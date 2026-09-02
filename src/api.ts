@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { LazyStore } from "@tauri-apps/plugin-store";
+import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 export type Platform = "macos" | "windows";
 
@@ -11,6 +12,7 @@ export interface AppConfig {
   peerChannel: number;
   pairingCode: string;
   autoRecall: boolean;
+  launchAtLogin: boolean;
   movementThreshold: number;
   debounceMs: number;
   networkPort: number;
@@ -63,6 +65,7 @@ const browserSnapshot: AppSnapshot = {
     peerChannel: 2,
     pairingCode: "KEYCLAIM",
     autoRecall: true,
+    launchAtLogin: false,
     movementThreshold: 3,
     debounceMs: 60,
     networkPort: 45823,
@@ -117,7 +120,9 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
   const initial = await call<AppSnapshot>("get_snapshot");
   if (!store) return initial;
   const saved = await store.get<AppConfig>("config");
-  return saved ? call<AppSnapshot>("update_config", { config: { ...initial.config, ...saved } }) : initial;
+  const launchAtLogin = await isEnabled().catch(() => false);
+  const config = { ...initial.config, ...saved, launchAtLogin };
+  return call<AppSnapshot>("update_config", { config });
 }
 
 export const getSnapshot = () => call<AppSnapshot>("get_snapshot");
@@ -126,7 +131,13 @@ export const testRecall = () => call<AppSnapshot>("test_recall");
 export const switchKeyboard = (channel: number) => call<AppSnapshot>("switch_keyboard", { channel });
 
 export async function saveConfig(config: AppConfig): Promise<AppSnapshot> {
-  if (store) await store.set("config", config);
+  if (store) {
+    const enabled = await isEnabled().catch(() => false);
+    if (config.launchAtLogin !== enabled) {
+      if (config.launchAtLogin) await enable(); else await disable();
+    }
+    await store.set("config", config);
+  }
   if (!isTauri()) {
     Object.assign(browserSnapshot.config, config);
     browserSnapshot.localHost.channel = config.channel;

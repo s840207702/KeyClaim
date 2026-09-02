@@ -22,7 +22,7 @@ const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
 ];
 
 const mockLoading: AppSnapshot = {
-  config: { hostId: "loading", hostName: "本机", platform: "macos", channel: 3, peerChannel: 2, pairingCode: "KEYCLAIM", autoRecall: true, movementThreshold: 3, debounceMs: 60, networkPort: 45823, ignoreSyntheticInput: true },
+  config: { hostId: "loading", hostName: "本机", platform: "macos", channel: 3, peerChannel: 2, pairingCode: "KEYCLAIM", autoRecall: true, launchAtLogin: false, movementThreshold: 3, debounceMs: 60, networkPort: 45823, ignoreSyntheticInput: true },
   localHost: { name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: false },
   peerHost: { name: "Windows 工作站", platform: "windows", channel: 2, online: false, ready: false },
   keyboard: { connected: false, supportsChangeHost: false },
@@ -142,7 +142,7 @@ function SettingsSheet({ config, onClose, onSave }: { config: AppConfig; onClose
     <header><div><span className="eyebrow">本机偏好</span><h2>设置</h2></div><button className="icon-button" onClick={onClose} aria-label="关闭设置"><X size={18} /></button></header>
     <div className="form-section"><h3>设备角色</h3><label><span>本机名称<small>会显示在另一台电脑上</small></span><input value={draft.hostName} onChange={(e) => setDraft({ ...draft, hostName: e.target.value })} /></label><label><span>本机通道<small>Mac 当前使用 3，Windows 使用 2</small></span><select value={draft.channel} onChange={(e) => setDraft({ ...draft, channel: Number(e.target.value), peerChannel: Number(e.target.value) === 3 ? 2 : 3 })}><option value={2}>通道 2</option><option value={3}>通道 3</option></select></label></div>
     <div className="form-section"><h3>双端握手</h3><label><span>配对码<small>两台电脑必须完全一致</small></span><input value={draft.pairingCode} onChange={(e) => setDraft({ ...draft, pairingCode: e.target.value })} /></label></div>
-    <div className="form-section"><h3>输入判定</h3><label><span>位移阈值<small>越低越灵敏，建议 3px</small></span><select value={draft.movementThreshold} onChange={(e) => setDraft({ ...draft, movementThreshold: Number(e.target.value) })}><option value={2}>2px · 极灵敏</option><option value={3}>3px · 推荐</option><option value={6}>6px · 稳健</option></select></label><label className="switch-row"><span>自动召回<small>检测到本地输入后发起归属请求</small></span><Toggle checked={draft.autoRecall} onChange={(autoRecall) => setDraft({ ...draft, autoRecall })} label="自动召回" /></label></div>
+    <div className="form-section"><h3>输入判定</h3><label><span>位移阈值<small>越低越灵敏，建议 3px</small></span><select value={draft.movementThreshold} onChange={(e) => setDraft({ ...draft, movementThreshold: Number(e.target.value) })}><option value={2}>2px · 极灵敏</option><option value={3}>3px · 推荐</option><option value={6}>6px · 稳健</option></select></label><label className="switch-row"><span>自动召回<small>检测到本地输入后发起归属请求</small></span><Toggle checked={draft.autoRecall} onChange={(autoRecall) => setDraft({ ...draft, autoRecall })} label="自动召回" /></label><label className="switch-row"><span>登录时启动<small>关窗后仍在菜单栏后台运行</small></span><Toggle checked={draft.launchAtLogin} onChange={(launchAtLogin) => setDraft({ ...draft, launchAtLogin })} label="登录时启动" /></label></div>
     <footer><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => onSave(draft)}>保存设置</button></footer>
   </section></div>;
 }

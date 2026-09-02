@@ -10,6 +10,7 @@ KeyClaim 需要在两台电脑上同时运行。目标电脑检测到本地指�
 - 目标电脑离线或未就绪时不切换。
 - 没有 2 秒锁定，默认只有 60ms 输入防抖。
 - macOS 的触控板和 Master 3S 都能触发。
+- 关闭主窗口后继续驻留菜单栏；可在设置中启用登录时启动。
 - 所有状态与配置只保存在本机。
 
 更完整的流程见 [技术架构](docs/ARCHITECTURE.md)，界面标准见 [设计规格](docs/design/SPEC.md)。
@@ -27,6 +28,12 @@ npm run tauri dev
 npm test
 npm run build
 cd src-tauri && cargo test
+```
+
+平时不必单独打开一个终端。只要让终端的工作目录指向本项目即可：
+
+```bash
+cd $HOME/KeyClaim
 ```
 
 ## 当前设备配置
