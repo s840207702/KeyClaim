@@ -1,5 +1,5 @@
 use std::{
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
@@ -189,6 +189,7 @@ async fn run_loop(
     let mut heartbeat = tokio::time::interval(Duration::from_millis(900));
     let mut hardware_scan = tokio::time::interval(Duration::from_secs(2));
     let mut pending_since: Option<Instant> = None;
+    let mut peer_addr: Option<SocketAddr> = None;
 
     loop {
         tokio::select! {
@@ -199,7 +200,7 @@ async fn run_loop(
                     pending_since = None;
                 }
                 if let Some(socket) = &socket {
-                    send_payload(socket, &snapshot, heartbeat_payload(&snapshot)).await;
+                    send_payload(socket, &snapshot, heartbeat_payload(&snapshot), peer_addr).await;
                 }
             }
             _ = hardware_scan.tick() => refresh_keyboard(&snapshot).await,
@@ -230,7 +231,7 @@ async fn run_loop(
                         };
                         pending_since = Some(Instant::now());
                         if let Some(socket) = &socket {
-                            send_payload(socket, &snapshot, payload).await;
+                            send_payload(socket, &snapshot, payload, peer_addr).await;
                         }
                     }
                 }
@@ -247,10 +248,16 @@ async fn run_loop(
                     None => std::future::pending().await,
                 }
             } => {
-                if let Some((size, _)) = result {
+                if let Some((size, source)) = result {
                     let code = snapshot.read().expect("snapshot poisoned").config.pairing_code.clone();
                     if let Ok(payload) = protocol::decode(&packet[..size], &code) {
-                        handle_network_payload(&snapshot, payload, socket.as_ref()).await;
+                        handle_network_payload(
+                            &snapshot,
+                            payload,
+                            socket.as_ref(),
+                            source,
+                            &mut peer_addr,
+                        ).await;
                     }
                 }
             }
@@ -272,7 +279,12 @@ fn heartbeat_payload(snapshot: &Arc<RwLock<AppSnapshot>>) -> Payload {
     }
 }
 
-async fn send_payload(socket: &UdpSocket, snapshot: &Arc<RwLock<AppSnapshot>>, payload: Payload) {
+async fn send_payload(
+    socket: &UdpSocket,
+    snapshot: &Arc<RwLock<AppSnapshot>>,
+    payload: Payload,
+    peer_addr: Option<SocketAddr>,
+) {
     let (code, port) = {
         let state = snapshot.read().expect("snapshot poisoned");
         (state.config.pairing_code.clone(), state.config.network_port)
@@ -280,6 +292,9 @@ async fn send_payload(socket: &UdpSocket, snapshot: &Arc<RwLock<AppSnapshot>>, p
     if let Ok(bytes) = protocol::encode(payload, &code) {
         let target = SocketAddrV4::new(Ipv4Addr::BROADCAST, port);
         let _ = socket.send_to(&bytes, target).await;
+        if let Some(peer_addr) = peer_addr {
+            let _ = socket.send_to(&bytes, peer_addr).await;
+        }
     }
 }
 
@@ -287,6 +302,8 @@ async fn handle_network_payload(
     snapshot: &Arc<RwLock<AppSnapshot>>,
     payload: Payload,
     socket: Option<&UdpSocket>,
+    source: SocketAddr,
+    peer_addr: &mut Option<SocketAddr>,
 ) {
     match payload {
         Payload::Heartbeat {
@@ -304,6 +321,7 @@ async fn handle_network_payload(
             {
                 return;
             }
+            *peer_addr = Some(source);
             let was_offline = !state.peer_host.online;
             state.peer_host.name = host_name;
             state.peer_host.platform = platform;
@@ -340,6 +358,7 @@ async fn handle_network_payload(
             if !allowed {
                 return;
             }
+            *peer_addr = Some(source);
             let result = perform_switch(snapshot, channel);
             if let Some(socket) = socket {
                 let host_id = snapshot
@@ -355,7 +374,7 @@ async fn handle_network_payload(
                     detail: result.err().unwrap_or_else(|| "键盘已切换".into()),
                     sent_at_ms: now_ms(),
                 };
-                send_payload(socket, snapshot, payload).await;
+                send_payload(socket, snapshot, payload, *peer_addr).await;
             }
         }
         Payload::SwitchResult {
@@ -370,6 +389,7 @@ async fn handle_network_payload(
             {
                 return;
             }
+            *peer_addr = Some(source);
             state.pending_claim = false;
             if success {
                 state.keyboard.current_channel = Some(target_channel);
@@ -495,6 +515,34 @@ mod tests {
         state.keyboard.current_channel = Some(3);
         record_peer_keyboard_channel(&mut state, false, None);
         assert_eq!(state.keyboard.current_channel, Some(3));
+    }
+
+    #[tokio::test]
+    async fn known_peer_receives_direct_heartbeat() {
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let peer_addr = receiver.local_addr().unwrap();
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        sender.set_broadcast(true).unwrap();
+
+        let mut state = mac_snapshot();
+        state.config.network_port = 59_999;
+        let snapshot = Arc::new(RwLock::new(state));
+        send_payload(
+            &sender,
+            &snapshot,
+            heartbeat_payload(&snapshot),
+            Some(peer_addr),
+        )
+        .await;
+
+        let mut packet = [0u8; 4_096];
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut packet))
+                .await
+                .expect("direct heartbeat timed out")
+                .unwrap();
+        let decoded = protocol::decode(&packet[..size], "KEYCLAIM").unwrap();
+        assert!(matches!(decoded, Payload::Heartbeat { channel: 3, .. }));
     }
 }
 

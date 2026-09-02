@@ -27,6 +27,6 @@ describe("KeyClaim", () => {
 
   it("在产品名称旁显示版本号", async () => {
     render(<App />);
-    expect(await screen.findByText("v0.1.3")).toBeVisible();
+    expect(await screen.findByText("v0.1.4")).toBeVisible();
   });
 });
