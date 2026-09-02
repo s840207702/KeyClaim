@@ -33,8 +33,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand img { width: 42px; height: 42px; border-radius: 11px; box-shadow: 0 4px 12px rgb(17 31 57 / 0.14); }
 .brand > div { display: flex; flex-direction: column; gap: 2px; }
-.brand strong { font-size: 18px; letter-spacing: -0.2px; }
-.brand span { color: var(--text-secondary); font-size: 14px; }
+.brand-name { display: flex; align-items: baseline; gap: 7px; font-size: 18px; letter-spacing: -0.2px; }
+.brand-name .version { color: var(--text-tertiary); font-size: 12px; font-weight: 650; letter-spacing: 0; }
+.brand > div > span { color: var(--text-secondary); font-size: 14px; }
 .header-actions { display: flex; align-items: center; gap: 10px; -webkit-app-region: no-drag; }
 .service-badge { min-height: 36px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px; color: var(--text-secondary); background: var(--surface-muted); border: 1px solid var(--border); border-radius: 10px; font-size: 14px; font-weight: 600; }
 .service-badge.ready { color: #147849; background: var(--success-soft); border-color: #cdebdc; }

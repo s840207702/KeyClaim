@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { LazyStore } from "@tauri-apps/plugin-store";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 
@@ -126,6 +127,7 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
 }
 
 export const getSnapshot = () => call<AppSnapshot>("get_snapshot");
+export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.1.0");
 export const refreshHardware = () => call<AppSnapshot>("refresh_hardware");
 export const testRecall = () => call<AppSnapshot>("test_recall");
 export const switchKeyboard = (channel: number) => call<AppSnapshot>("switch_keyboard", { channel });

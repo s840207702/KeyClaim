@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import "./App.css";
 import {
-  AppConfig, AppSnapshot, getSnapshot, loadSnapshot, refreshHardware, saveConfig,
+  AppConfig, AppSnapshot, getAppVersion, getSnapshot, loadSnapshot, refreshHardware, saveConfig,
   switchKeyboard,
 } from "./api";
 
@@ -87,10 +87,12 @@ function App() {
   const [busyChannel, setBusyChannel] = useState<number>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [message, setMessage] = useState<string>();
+  const [appVersion, setAppVersion] = useState("0.1.0");
 
   useEffect(() => {
     let mounted = true;
     loadSnapshot().then((next) => { if (mounted) setSnapshot(next); }).catch(() => { if (mounted) setMessage("读取本机状态失败"); }).finally(() => { if (mounted) setLoading(false); });
+    getAppVersion().then((version) => { if (mounted) setAppVersion(version); }).catch(() => undefined);
     const timer = window.setInterval(() => getSnapshot().then((next) => { if (mounted) setSnapshot(next); }).catch(() => undefined), 900);
     return () => { mounted = false; window.clearInterval(timer); };
   }, []);
@@ -158,7 +160,7 @@ function App() {
 
   return <div className="app-shell">
     <header className="app-header">
-      <div className="brand"><img src="/keyclaim-icon.png" alt="" /><div><strong>KeyClaim</strong><span>键盘自动归属</span></div></div>
+      <div className="brand"><img src="/keyclaim-icon.png" alt="" /><div><strong className="brand-name">KeyClaim <span className="version">v{appVersion}</span></strong><span>键盘自动归属</span></div></div>
       <div className="header-actions"><span className={`service-badge ${servicesReady ? "ready" : ""}`}><StatusDot online={servicesReady} />{servicesReady ? "服务正常" : "正在连接"}</span><button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="打开设置"><Settings size={20} /></button></div>
     </header>
 
@@ -176,7 +178,7 @@ function App() {
 
       <section className="quick-settings" aria-label="常用设置">
         <SettingRow title="自动跟随" detail="检测到本机鼠标或触控板后召回键盘"><Toggle checked={snapshot.config.autoRecall} disabled={loading} onChange={(autoRecall) => updateQuickSetting({ autoRecall })} label="自动跟随" /></SettingRow>
-        <SettingRow title="登录时启动" detail="关闭窗口后继续在菜单栏运行"><Toggle checked={snapshot.config.launchAtLogin} disabled={loading} onChange={(launchAtLogin) => updateQuickSetting({ launchAtLogin })} label="登录时启动" /></SettingRow>
+        <SettingRow title="开机自动运行" detail="登录系统后自动在后台启动 KeyClaim"><Toggle checked={snapshot.config.launchAtLogin} disabled={loading} onChange={(launchAtLogin) => updateQuickSetting({ launchAtLogin })} label="开机自动运行" /></SettingRow>
       </section>
 
       {message && <div className="error-message" role="status"><CircleAlert size={18} />{message}</div>}

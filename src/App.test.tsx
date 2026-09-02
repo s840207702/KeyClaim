@@ -24,4 +24,9 @@ describe("KeyClaim", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
     expect(screen.queryByRole("dialog", { name: "KeyClaim 设置" })).not.toBeInTheDocument();
   });
+
+  it("在产品名称旁显示版本号", async () => {
+    render(<App />);
+    expect(await screen.findByText("v0.1.0")).toBeVisible();
+  });
 });

@@ -54,8 +54,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--autostart"]),
+            tauri_plugin_autostart::MacosLauncher::AppleScript,
+            Some(vec!["--hidden"]),
         ))
         .setup(|app| {
             app.manage(Runtime::new(AppConfig::default()));
@@ -90,7 +90,8 @@ pub fn run() {
 
             tray_builder.build(app)?;
 
-            if std::env::args().any(|argument| argument == "--autostart") {
+            if std::env::args().any(|argument| argument == "--autostart" || argument == "--hidden")
+            {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
