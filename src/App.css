@@ -43,7 +43,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .icon-button:hover { color: var(--text); background: #f5f6f8; border-color: #bcc4ce; }
 .icon-button:active { transform: scale(0.96); }
 
-main { width: min(100% - 48px, 900px); margin: 0 auto; padding: 30px 0 24px; }
+main { width: min(100% - 48px, 900px); margin: 0 auto; padding: 24px 0 12px; }
 .ownership-card { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 17px; min-height: 118px; padding: 22px 24px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
 .keyboard-icon { width: 52px; height: 52px; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); border-radius: 13px; }
 .ownership-copy { min-width: 0; }
@@ -84,14 +84,14 @@ main { width: min(100% - 48px, 900px); margin: 0 auto; padding: 30px 0 24px; }
 .toggle:disabled { opacity: 0.55; cursor: default; }
 
 .error-message { min-height: 42px; display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 9px 12px; color: #9d3636; background: #fff3f3; border: 1px solid #f0cccc; border-radius: 10px; font-size: 14px; }
-.status-footer { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 15px; padding: 0 2px; }
+.status-footer { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 12px; padding: 0 2px; }
 .health { min-width: 0; display: flex; align-items: center; gap: 18px; color: var(--text-secondary); }
 .health span { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; white-space: nowrap; }
 .health svg { color: #748093; }
 .refresh-button { flex: none; display: inline-flex; align-items: center; gap: 7px; padding: 8px 10px; color: var(--text-secondary); background: transparent; border: 0; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
 .refresh-button:hover { color: var(--text); background: rgb(25 34 48 / 0.05); }
 .refresh-button:disabled { opacity: 0.5; cursor: default; }
-.latest-activity { display: flex; align-items: center; gap: 8px; margin: 2px 0 0; padding-top: 14px; color: var(--text-secondary); border-top: 1px solid var(--border); font-size: 14px; white-space: nowrap; }
+.latest-activity { display: flex; align-items: center; gap: 8px; margin: 0; padding-top: 10px; color: var(--text-secondary); border-top: 1px solid var(--border); font-size: 14px; white-space: nowrap; }
 .latest-activity > span { color: var(--text-tertiary); }
 .latest-activity time { margin-left: auto; color: var(--text-tertiary); }
 

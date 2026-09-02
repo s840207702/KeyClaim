@@ -1,0 +1,47 @@
+name: Windows 构建检查
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 运行前端测试
+        run: npm test -- --run
+
+      - name: 运行 Rust 测试
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: 检查 Windows 诊断脚本语法
+        shell: pwsh
+        run: |
+          $source = Get-Content .\scripts\diagnose-windows.ps1 -Raw
+          [void][scriptblock]::Create($source)
+
+      - name: 构建 Windows 安装包
+        run: npm run tauri build -- --bundles nsis
+
+      - name: 保存 Windows 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeyClaim-Windows-${{ github.sha }}
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error

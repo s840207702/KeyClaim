@@ -96,6 +96,14 @@ npm run tauri build
 
 Windows 端需要与 Mac 使用相同配对码，并把本机通道设为 `2`。
 
+如果 Windows 端没有被 Mac 识别，先让 Windows Codex 在项目根目录执行只读诊断：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\diagnose-windows.ps1
+```
+
+脚本只读取 KeyClaim 进程、UDP `45823` 监听、防火墙规则、网卡、配置摘要和 Logitech HID 设备，不会输出配对码，也不会修改系统设置。
+
 ## 验证
 
 ```bash
@@ -130,7 +138,7 @@ KeyClaim 不包含账号、云服务、遥测或公网中继。局域网消息�
 
 ## 当前阶段
 
-当前版本为 `0.1.1`，Mac 应用已经完成本机构建、安装和启动验证。Windows 安装包以及真实双机的睡眠、唤醒、离线和连续往返切换仍需在 Windows 实体机上完成最终验收。
+当前版本为 `0.1.2`，Mac 应用已经完成本机构建、安装和启动验证。Windows 安装包以及真实双机的睡眠、唤醒、离线和连续往返切换仍需在 Windows 实体机上完成最终验收。
 
 第一版输入判定基于全局光标位移，因此 Mac 触控板可以触发；远程控制或模拟鼠标输入过滤仍是实验性能力。正式长期运行前，需要继续把物理来源识别下沉到 macOS CGEventTap 和 Windows 低级鼠标钩子。
 
