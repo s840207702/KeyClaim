@@ -1,51 +1,145 @@
-# KeyClaim
+<div align="center">
+  <img src="docs/assets/keyclaim-icon.png" width="156" alt="KeyClaim 图标">
+  <h1>KeyClaim</h1>
+  <p>让 MX Keys 自动跟随你正在使用的电脑。</p>
+  <p>移动鼠标或触控板，键盘就在 Windows 与 macOS 之间自动归位。</p>
+</div>
 
-让 MX Keys 跟随本地鼠标或触控板，在 Windows 通道 2 与 Mac 通道 3 之间自动归位。
+![KeyClaim 主界面](docs/assets/keyclaim-home.png)
 
-## 工作方式
+## 它解决什么
 
-KeyClaim 需要在两台电脑上同时运行。目标电脑检测到本地指针活动后，通过局域网向当前持有键盘的电脑发送签名召回请求；持有方确认目标在线、就绪，再用 Logitech HID++ `ChangeHost` 切换键盘。
+当一把 MX Keys 分别通过接收器连接 Windows 和 Mac 时，每次切换电脑都要再按一次 Easy-Switch。KeyClaim 在两台电脑上同时运行，判断你正在操作哪一台，然后让当前持有键盘的电脑把键盘切到对应通道。
 
-- 仅在实际输入后召回，不因系统单纯唤醒而切换。
-- 目标电脑离线或未就绪时不切换。
-- 没有 2 秒锁定，默认只有 60ms 输入防抖。
-- macOS 的触控板和 Master 3S 都能触发。
-- 关闭主窗口后继续驻留菜单栏；可在设置中启用登录时启动。
-- 所有状态与配置只保存在本机。
-
-更完整的流程见 [技术架构](docs/ARCHITECTURE.md)，界面标准见 [设计规格](docs/design/SPEC.md)。
-
-## 开发
-
-```bash
-npm install
-npm run tauri dev
-```
-
-常用检查：
-
-```bash
-npm test
-npm run build
-cd src-tauri && cargo test
-```
-
-平时不必单独打开一个终端。只要让终端的工作目录指向本项目即可：
-
-```bash
-cd $HOME/KeyClaim
-```
-
-## 当前设备配置
+当前为非哥的设备组合预设：
 
 - Windows 工作站：MX Keys 通道 2，MX Master 3。
 - MacBook Pro：MX Keys 通道 3，MX Master 3S 与内置触控板。
 - macOS 优先寻找 PID `0xC52B` 的 Unifying 接收器，避免误控制 PID `0xC548` 的 Bolt 鼠标。
 
-## 已知边界
+## 工作方式
 
-第一版输入监听使用全局光标位移，远程控制/模拟输入过滤仍是实验性能力。正式长期运行前，需在 macOS 和 Windows 分别完成原生事件来源过滤，并在真实双机上验收睡眠、唤醒、离线和往返切换。
+```text
+鼠标或触控板产生本地输入
+            ↓
+目标电脑通过局域网发起签名召回
+            ↓
+当前持有键盘的电脑确认目标在线、就绪
+            ↓
+Logitech HID++ ChangeHost 切换 MX Keys 通道
+```
+
+- 只有实际指针活动才会触发，不会因电脑单纯唤醒而切换。
+- 另一台电脑离线或未就绪时不发送错误指令。
+- 没有 2 秒锁定，默认仅使用 60ms 输入防抖。
+- 关闭窗口后继续驻留菜单栏，可选登录时自动启动。
+- 配置、输入状态与运行记录只保存在本机。
+
+## 界面
+
+KeyClaim 是一个单任务后台工具，主界面只保留五件事：
+
+1. 当前键盘归属。
+2. 两台电脑的在线状态与通道。
+3. 手动切换兜底。
+4. 自动跟随与登录启动。
+5. 输入监听、局域网和最近一次动作状态。
+
+高级配置通过右上角设置按钮或 `⌘,` / `Ctrl+,` 打开。
+
+## 快速开始
+
+### 环境要求
+
+- Node.js 20 或更高版本
+- Rust stable
+- macOS 12 或更高版本，或 Windows 10 / 11
+- 两台电脑处于同一局域网
+
+### 本地开发
+
+```bash
+cd $HOME/KeyClaim
+npm install
+npm run tauri dev
+```
+
+Codex 或终端只需要把工作目录指向项目根目录，不必为项目额外创建一种特殊终端。
+
+### macOS 构建
+
+```bash
+npm run tauri build -- --bundles app
+```
+
+应用生成在：
+
+```text
+src-tauri/target/release/bundle/macos/KeyClaim.app
+```
+
+当前 Mac 已安装到：
+
+```text
+/Applications/KeyClaim.app
+```
+
+### Windows 构建
+
+在 Windows PowerShell 的项目根目录执行：
+
+```powershell
+npm install
+npm test
+npm run tauri build
+```
+
+Windows 端需要与 Mac 使用相同配对码，并把本机通道设为 `2`。
+
+## 验证
+
+```bash
+npm test
+npm run build
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+自动化测试覆盖配置交互、签名消息往返、错误配对码拒绝和非法通道保护。真实 Logitech 接收器探测测试默认忽略，只在键盘已唤醒且需要硬件验收时手动运行。
+
+## 项目结构
+
+```text
+KeyClaim/
+├─ docs/                       架构、设计规范与 README 素材
+├─ public/                     前端品牌资源
+├─ src/                        React 单页界面与 Tauri 调用
+├─ src-tauri/src/runtime.rs    输入监听、双端心跳与召回状态机
+├─ src-tauri/src/protocol.rs   HMAC-SHA256 局域网消息协议
+├─ src-tauri/src/logitech.rs   Windows HIDAPI 后端
+└─ src-tauri/src/native/       macOS IOKit HID++ 后端
+```
+
+更完整的实现说明见 [技术架构](docs/ARCHITECTURE.md)，界面原则见 [设计规格](docs/design/SPEC.md)。
+
+## 权限与隐私
+
+KeyClaim 不包含账号、云服务、遥测或公网中继。局域网消息使用双方相同的配对码签名，过期消息会被拒绝。macOS 首次运行时可能需要按系统提示允许输入监听与本地网络访问。
+
+配对码用于局域网内设备认证，不应复用任何账号密码。应用设置保存在系统应用数据目录，不进入 Git 仓库。
+
+## 当前阶段
+
+当前版本为 `0.1.0`，Mac 应用已经完成本机构建、安装和启动验证。Windows 安装包以及真实双机的睡眠、唤醒、离线和连续往返切换仍需在 Windows 实体机上完成最终验收。
+
+第一版输入判定基于全局光标位移，因此 Mac 触控板可以触发；远程控制或模拟鼠标输入过滤仍是实验性能力。正式长期运行前，需要继续把物理来源识别下沉到 macOS CGEventTap 和 Windows 低级鼠标钩子。
+
+当前构建为本机临时签名，尚未进行 Apple Developer ID 签名、公证或自动更新发布。
 
 ## 开源声明
 
 HID++ 协议实现参考 `mxswitch`（MIT），详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## 许可证
+
+当前仓库为私有项目，尚未添加开源许可证。未经许可，不代表可以复制、分发或商用。

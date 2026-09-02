@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
@@ -8,22 +8,20 @@ afterEach(() => {
 });
 
 describe("KeyClaim", () => {
-  it("renders the ownership overview and toggles automatic recall", async () => {
+  it("显示当前归属并切换自动跟随", async () => {
     render(<App />);
-    expect(screen.getByRole("heading", { name: "键盘会跟随你的工作位置" })).toBeVisible();
-    const toggle = screen.getByRole("switch", { name: "自动召回" });
+    expect(screen.getByRole("heading", { name: "MacBook Pro" })).toBeVisible();
+    const toggle = screen.getByRole("switch", { name: "自动跟随" });
     await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
   });
 
-  it("opens settings and shows diagnostics", () => {
+  it("从顶部直接打开设置", () => {
     render(<App />);
-    const nav = screen.getByRole("navigation", { name: "主导航" });
-    fireEvent.click(within(nav).getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
     expect(screen.getByRole("dialog", { name: "KeyClaim 设置" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "关闭设置" }));
-    fireEvent.click(within(nav).getByRole("button", { name: "诊断" }));
-    expect(screen.getByRole("heading", { name: "运行诊断" })).toBeVisible();
+    expect(screen.queryByRole("dialog", { name: "KeyClaim 设置" })).not.toBeInTheDocument();
   });
 });
