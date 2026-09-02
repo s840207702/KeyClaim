@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(not(target_os = "macos"))]
 use device_query::{DeviceQuery, DeviceState};
 use tokio::{net::UdpSocket, sync::mpsc};
 
@@ -86,6 +87,74 @@ fn add_activity(snapshot: &mut AppSnapshot, title: &str, detail: String, kind: &
     snapshot.activities.truncate(8);
 }
 
+fn monitor_pointer<F>(
+    snapshot: Arc<RwLock<AppSnapshot>>,
+    events: mpsc::UnboundedSender<LocalEvent>,
+    mut read_position: F,
+) where
+    F: FnMut() -> Option<(i32, i32)>,
+{
+    let Some(mut last) = read_position() else {
+        return;
+    };
+    snapshot
+        .write()
+        .expect("snapshot poisoned")
+        .diagnostics
+        .input_monitor = true;
+    let mut last_trigger = Instant::now() - Duration::from_secs(2);
+    loop {
+        std::thread::sleep(Duration::from_millis(16));
+        let Some(current) = read_position() else {
+            snapshot
+                .write()
+                .expect("snapshot poisoned")
+                .diagnostics
+                .input_monitor = false;
+            continue;
+        };
+        let (threshold, debounce, enabled) = {
+            let state = snapshot.read().expect("snapshot poisoned");
+            (
+                state.config.movement_threshold,
+                state.config.debounce_ms,
+                state.config.auto_recall,
+            )
+        };
+        let distance = (current.0 - last.0).abs() + (current.1 - last.1).abs();
+        last = current;
+        if enabled
+            && distance >= threshold
+            && last_trigger.elapsed() >= Duration::from_millis(debounce)
+        {
+            last_trigger = Instant::now();
+            let _ = events.send(LocalEvent::PointerMoved);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn keyclaim_get_cursor_position(x: *mut i32, y: *mut i32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn start_input_monitor(
+    snapshot: Arc<RwLock<AppSnapshot>>,
+    events: mpsc::UnboundedSender<LocalEvent>,
+) {
+    std::thread::spawn(move || {
+        monitor_pointer(snapshot, events, || {
+            let mut x = 0;
+            let mut y = 0;
+            // SAFETY: 原生函数只在调用期间写入两个有效的定长整数指针。
+            let success = unsafe { keyclaim_get_cursor_position(&mut x, &mut y) };
+            (success != 0).then_some((x, y))
+        });
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
 fn start_input_monitor(
     snapshot: Arc<RwLock<AppSnapshot>>,
     events: mpsc::UnboundedSender<LocalEvent>,
@@ -94,34 +163,7 @@ fn start_input_monitor(
         let Some(device_state) = DeviceState::checked_new() else {
             return;
         };
-        snapshot
-            .write()
-            .expect("snapshot poisoned")
-            .diagnostics
-            .input_monitor = true;
-        let mut last = device_state.get_mouse().coords;
-        let mut last_trigger = Instant::now() - Duration::from_secs(2);
-        loop {
-            std::thread::sleep(Duration::from_millis(16));
-            let current = device_state.get_mouse().coords;
-            let (threshold, debounce, enabled) = {
-                let state = snapshot.read().expect("snapshot poisoned");
-                (
-                    state.config.movement_threshold,
-                    state.config.debounce_ms,
-                    state.config.auto_recall,
-                )
-            };
-            let distance = (current.0 - last.0).abs() + (current.1 - last.1).abs();
-            last = current;
-            if enabled
-                && distance >= threshold
-                && last_trigger.elapsed() >= Duration::from_millis(debounce)
-            {
-                last_trigger = Instant::now();
-                let _ = events.send(LocalEvent::PointerMoved);
-            }
-        }
+        monitor_pointer(snapshot, events, || Some(device_state.get_mouse().coords));
     });
 }
 
@@ -166,11 +208,7 @@ async fn run_loop(
                     let should_claim = {
                         let mut state = snapshot.write().expect("snapshot poisoned");
                         state.last_local_input_ms = Some(now_ms());
-                        state.config.auto_recall
-                            && state.peer_host.online
-                            && state.peer_host.ready
-                            && state.keyboard.current_channel != Some(state.config.channel)
-                            && !state.pending_claim
+                        should_request_claim(&state)
                     };
                     if should_claim {
                         let payload = {
@@ -257,8 +295,9 @@ async fn handle_network_payload(
             platform,
             channel,
             ready,
+            keyboard_connected,
+            current_channel,
             sent_at_ms,
-            ..
         } => {
             let mut state = snapshot.write().expect("snapshot poisoned");
             if host_id == state.config.host_id || (now_ms() - sent_at_ms).abs() > MESSAGE_MAX_AGE_MS
@@ -272,6 +311,7 @@ async fn handle_network_payload(
             state.peer_host.online = true;
             state.peer_host.ready = ready;
             state.peer_host.last_seen_ms = Some(now_ms());
+            record_peer_keyboard_channel(&mut state, keyboard_connected, current_channel);
             if was_offline {
                 add_activity(
                     &mut state,
@@ -378,13 +418,83 @@ async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) {
         }
         Ok(Err(error)) => {
             state.keyboard.connected = false;
+            state.keyboard.current_channel = None;
             state.keyboard.supports_change_host = false;
             state.keyboard.last_error = Some(error.to_string());
         }
         Err(error) => {
             state.keyboard.connected = false;
+            state.keyboard.current_channel = None;
             state.keyboard.last_error = Some(format!("硬件扫描任务失败: {error}"));
         }
+    }
+}
+
+fn should_request_claim(state: &AppSnapshot) -> bool {
+    state.config.auto_recall
+        && state.peer_host.online
+        && state.peer_host.ready
+        && state.keyboard.current_channel != Some(state.config.channel)
+        && !state.pending_claim
+}
+
+fn record_peer_keyboard_channel(
+    state: &mut AppSnapshot,
+    keyboard_connected: bool,
+    current_channel: Option<u8>,
+) {
+    if keyboard_connected && current_channel.is_some() {
+        state.keyboard.current_channel = current_channel;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{AppConfig, AppSnapshot, Platform};
+
+    fn mac_snapshot() -> AppSnapshot {
+        let config = AppConfig {
+            platform: Platform::Macos,
+            channel: 3,
+            peer_channel: 2,
+            ..AppConfig::default()
+        };
+        let mut state = AppSnapshot::initial(config);
+        state.peer_host.online = true;
+        state.peer_host.ready = true;
+        state
+    }
+
+    #[test]
+    fn unknown_channel_requests_keyboard_from_ready_peer() {
+        let mut state = mac_snapshot();
+        state.keyboard.current_channel = None;
+        assert!(should_request_claim(&state));
+    }
+
+    #[test]
+    fn local_channel_does_not_request_keyboard_again() {
+        let mut state = mac_snapshot();
+        state.keyboard.current_channel = Some(3);
+        assert!(!should_request_claim(&state));
+    }
+
+    #[test]
+    fn peer_heartbeat_corrects_stale_keyboard_channel() {
+        let mut state = mac_snapshot();
+        state.keyboard.current_channel = Some(3);
+        record_peer_keyboard_channel(&mut state, true, Some(2));
+        assert_eq!(state.keyboard.current_channel, Some(2));
+        assert!(should_request_claim(&state));
+    }
+
+    #[test]
+    fn disconnected_peer_does_not_overwrite_known_channel() {
+        let mut state = mac_snapshot();
+        state.keyboard.current_channel = Some(3);
+        record_peer_keyboard_channel(&mut state, false, None);
+        assert_eq!(state.keyboard.current_channel, Some(3));
     }
 }
 

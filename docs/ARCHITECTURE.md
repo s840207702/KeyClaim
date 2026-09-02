@@ -25,6 +25,6 @@ MX Keys 离开某台电脑后，那台电脑的接收器无法再直接控制它
 
 ## 当前边界
 
-macOS 与 Windows 的第一版输入监听基于全局光标位移，因此触控板可正常触发；远程控制/模拟输入过滤仍是实验性能力。后续应在 macOS 使用 CGEventTap 的事件来源字段、在 Windows 使用低级鼠标钩子的 injected 标志，把物理来源识别下沉到原生层。
+macOS 与 Windows 的第一版输入监听基于全局光标位移，因此触控板可正常触发；远程控制/模拟输入过滤仍是实验性能力。macOS 使用无需辅助功能授权的 AppKit `NSEvent.mouseLocation` 轮询，Windows 使用系统指针查询。后续若需要严格过滤模拟输入，再在 macOS 使用 CGEventTap 的事件来源字段、在 Windows 使用低级鼠标钩子的 injected 标志。
 
 macOS 上当前优先选择 `0xC52B` Unifying 接收器；非 Unifying 设备会再通过 `0x0005` 设备类型能力确认键盘。这样不会误把本机的 Bolt 鼠标当成 MX Keys。
