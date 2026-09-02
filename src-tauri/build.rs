@@ -1,10 +1,14 @@
 fn main() {
     #[cfg(target_os = "macos")]
-    cc::Build::new()
-        .file("native/logitech_hidpp_macos.c")
-        .file("native/cursor_macos.m")
-        .flag("-Wno-deprecated-declarations")
-        .compile("keyclaim_logitech_macos");
+    {
+        println!("cargo:rerun-if-changed=native/logitech_hidpp_macos.c");
+        println!("cargo:rerun-if-changed=native/cursor_macos.m");
+        cc::Build::new()
+            .file("native/logitech_hidpp_macos.c")
+            .file("native/cursor_macos.m")
+            .flag("-Wno-deprecated-declarations")
+            .compile("keyclaim_logitech_macos");
+    }
 
     #[cfg(target_os = "macos")]
     {

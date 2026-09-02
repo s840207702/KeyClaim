@@ -97,6 +97,7 @@ pub struct ActivityEntry {
 pub struct DiagnosticsView {
     pub input_monitor: bool,
     pub network_listener: bool,
+    pub hid_access: bool,
     pub receiver_probe: bool,
     pub synthetic_filter_mode: String,
 }
@@ -149,6 +150,7 @@ impl AppSnapshot {
             diagnostics: DiagnosticsView {
                 input_monitor: false,
                 network_listener: false,
+                hid_access: !cfg!(target_os = "macos"),
                 receiver_probe: false,
                 synthetic_filter_mode: "实验性：当前按光标位移识别".into(),
             },

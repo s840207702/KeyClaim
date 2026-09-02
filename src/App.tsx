@@ -6,7 +6,7 @@ import {
 import "./App.css";
 import {
   AppConfig, AppSnapshot, getAppVersion, getSnapshot, loadSnapshot, refreshHardware, saveConfig,
-  switchKeyboard,
+  requestHidAccess, switchKeyboard,
 } from "./api";
 
 const mockLoading: AppSnapshot = {
@@ -14,7 +14,7 @@ const mockLoading: AppSnapshot = {
   localHost: { name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: false },
   peerHost: { name: "Windows 工作站", platform: "windows", channel: 2, online: false, ready: false },
   keyboard: { connected: false, supportsChangeHost: false },
-  diagnostics: { inputMonitor: false, networkListener: false, receiverProbe: false, syntheticFilterMode: "正在初始化" },
+  diagnostics: { inputMonitor: false, networkListener: false, hidAccess: false, receiverProbe: false, syntheticFilterMode: "正在初始化" },
   activities: [],
   pendingClaim: false,
 };
@@ -87,7 +87,7 @@ function App() {
   const [busyChannel, setBusyChannel] = useState<number>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [message, setMessage] = useState<string>();
-  const [appVersion, setAppVersion] = useState("0.1.4");
+  const [appVersion, setAppVersion] = useState("0.1.5");
 
   useEffect(() => {
     let mounted = true;
@@ -155,7 +155,17 @@ function App() {
     }
   };
 
-  const servicesReady = snapshot.diagnostics.inputMonitor && snapshot.diagnostics.networkListener;
+  const handlePermission = async () => {
+    setMessage(undefined);
+    try {
+      setSnapshot(await requestHidAccess());
+    } catch {
+      setMessage("没有成功发起设备控制授权，请在系统设置中允许 KeyClaim");
+    }
+  };
+
+  const needsHidPermission = snapshot.config.platform === "macos" && !snapshot.diagnostics.hidAccess;
+  const servicesReady = snapshot.diagnostics.inputMonitor && snapshot.diagnostics.networkListener && snapshot.diagnostics.hidAccess;
   const latestActivity = snapshot.activities[0];
 
   return <div className="app-shell">
@@ -181,10 +191,12 @@ function App() {
         <SettingRow title="开机自动运行" detail="登录系统后自动在后台启动 KeyClaim"><Toggle checked={snapshot.config.launchAtLogin} disabled={loading} onChange={(launchAtLogin) => updateQuickSetting({ launchAtLogin })} label="开机自动运行" /></SettingRow>
       </section>
 
+      {needsHidPermission && <div className="permission-banner" role="alert"><CircleAlert size={19} /><div><strong>需要允许设备控制</strong><span>没有“输入监控”权限，KeyClaim 无法访问 Logitech 接收器。</span></div><button onClick={handlePermission}>前往允许</button></div>}
+
       {message && <div className="error-message" role="status"><CircleAlert size={18} />{message}</div>}
 
       <footer className="status-footer">
-        <div className="health"><span><MousePointer2 size={17} />输入监听 {snapshot.diagnostics.inputMonitor ? "正常" : "未就绪"}</span><span><Wifi size={17} />另一台电脑 {snapshot.peerHost.online ? "在线" : "离线"}</span><span><ShieldCheck size={17} />仅在本地运行</span></div>
+        <div className="health"><span><MousePointer2 size={17} />指针检测 {snapshot.diagnostics.inputMonitor ? "正常" : "未就绪"}</span><span><Wifi size={17} />另一台电脑 {snapshot.peerHost.online ? "在线" : "离线"}</span><span><ShieldCheck size={17} />设备控制 {snapshot.diagnostics.hidAccess ? "已允许" : "未允许"}</span></div>
         <button className="refresh-button" onClick={handleRefresh} disabled={loading}>{loading ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}重新检测</button>
       </footer>
 

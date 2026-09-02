@@ -45,6 +45,9 @@ pub enum LogitechError {
     Hid(#[from] hidapi::HidError),
     #[error("未找到支持 Easy-Switch 的 MX Keys；请先轻按键盘唤醒")]
     NotFound,
+    #[cfg(target_os = "macos")]
+    #[error("macOS 尚未允许 KeyClaim 使用输入监控，无法访问 Logitech 接收器")]
+    PermissionDenied,
     #[error("通道必须是 1、2 或 3")]
     InvalidChannel,
     #[cfg(not(target_os = "macos"))]
@@ -240,10 +243,37 @@ struct NativeProbeResult {
 unsafe extern "C" {
     fn keyclaim_probe_keyboard(output: *mut NativeProbeResult) -> i32;
     fn keyclaim_switch_keyboard(channel: i32) -> i32;
+    fn keyclaim_hid_access_status() -> i32;
+    fn keyclaim_request_hid_access() -> i32;
+}
+
+#[cfg(target_os = "macos")]
+pub fn hid_access_granted() -> bool {
+    // SAFETY: 原生函数不接收指针，只返回系统当前的只读授权状态。
+    unsafe { keyclaim_hid_access_status() == 0 }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn hid_access_granted() -> bool {
+    true
+}
+
+#[cfg(target_os = "macos")]
+pub fn request_hid_access() -> bool {
+    // SAFETY: 原生函数仅调用 macOS 官方授权接口，不读写调用方内存。
+    unsafe { keyclaim_request_hid_access() != 0 }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_hid_access() -> bool {
+    true
 }
 
 #[cfg(target_os = "macos")]
 pub fn probe() -> Result<ProbeResult, LogitechError> {
+    if !hid_access_granted() {
+        return Err(LogitechError::PermissionDenied);
+    }
     let mut native = NativeProbeResult::default();
     // SAFETY: C 端只在调用期间写入该定长结构体，不保留指针。
     let success = unsafe { keyclaim_probe_keyboard(&mut native) };
@@ -270,6 +300,9 @@ pub fn probe() -> Result<ProbeResult, LogitechError> {
 pub fn switch_to(channel: u8) -> Result<(), LogitechError> {
     if !(1..=3).contains(&channel) {
         return Err(LogitechError::InvalidChannel);
+    }
+    if !hid_access_granted() {
+        return Err(LogitechError::PermissionDenied);
     }
     // SAFETY: C 端只接收整数值，目标通道已在上方校验。
     if unsafe { keyclaim_switch_keyboard(channel as i32) } == 0 {

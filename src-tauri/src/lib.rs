@@ -43,6 +43,11 @@ fn switch_keyboard(channel: u8, runtime: State<'_, Runtime>) -> AppSnapshot {
 }
 
 #[tauri::command]
+fn request_hid_access(runtime: State<'_, Runtime>) -> AppSnapshot {
+    runtime.request_hid_access()
+}
+
+#[tauri::command]
 fn update_config(config: AppConfig, runtime: State<'_, Runtime>) -> AppSnapshot {
     runtime.update_config(config);
     runtime.snapshot()
@@ -110,6 +115,7 @@ pub fn run() {
             refresh_hardware,
             test_recall,
             switch_keyboard,
+            request_hid_access,
             update_config
         ])
         .run(tauri::generate_context!())

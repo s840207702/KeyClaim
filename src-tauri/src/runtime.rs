@@ -63,6 +63,23 @@ impl Runtime {
         let _ = self.events.send(LocalEvent::PointerMoved);
     }
 
+    pub fn request_hid_access(&self) -> AppSnapshot {
+        let granted = logitech::request_hid_access();
+        {
+            let mut snapshot = self.snapshot.write().expect("snapshot poisoned");
+            snapshot.diagnostics.hid_access = granted || logitech::hid_access_granted();
+            snapshot.local_host.ready = snapshot.diagnostics.hid_access;
+            if !snapshot.diagnostics.hid_access {
+                snapshot.keyboard.last_error =
+                    Some("请在系统设置 → 隐私与安全性 → 输入监控中允许 KeyClaim".into());
+            }
+        }
+        if granted {
+            let _ = self.events.send(LocalEvent::RefreshHardware);
+        }
+        self.snapshot()
+    }
+
     fn start(&self, receiver: mpsc::UnboundedReceiver<LocalEvent>) {
         start_input_monitor(self.snapshot.clone(), self.events.clone());
         tauri::async_runtime::spawn(run_loop(self.snapshot.clone(), receiver));
@@ -425,9 +442,24 @@ fn perform_switch(snapshot: &Arc<RwLock<AppSnapshot>>, channel: u8) -> Result<()
 }
 
 async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) {
+    let hid_access = logitech::hid_access_granted();
+    if !hid_access {
+        let mut state = snapshot.write().expect("snapshot poisoned");
+        state.diagnostics.hid_access = false;
+        state.diagnostics.receiver_probe = false;
+        state.local_host.ready = false;
+        state.keyboard.connected = false;
+        state.keyboard.current_channel = None;
+        state.keyboard.supports_change_host = false;
+        state.keyboard.last_error =
+            Some("请在系统设置 → 隐私与安全性 → 输入监控中允许 KeyClaim".into());
+        return;
+    }
     let result = tokio::task::spawn_blocking(logitech::probe).await;
     let mut state = snapshot.write().expect("snapshot poisoned");
+    state.diagnostics.hid_access = true;
     state.diagnostics.receiver_probe = true;
+    state.local_host.ready = true;
     match result {
         Ok(Ok(found)) => {
             state.keyboard.connected = true;

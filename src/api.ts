@@ -43,6 +43,7 @@ export interface AppSnapshot {
   diagnostics: {
     inputMonitor: boolean;
     networkListener: boolean;
+    hidAccess: boolean;
     receiverProbe: boolean;
     syntheticFilterMode: string;
   };
@@ -97,6 +98,7 @@ const browserSnapshot: AppSnapshot = {
   diagnostics: {
     inputMonitor: true,
     networkListener: true,
+    hidAccess: true,
     receiverProbe: true,
     syntheticFilterMode: "实验性：当前按光标位移识别",
   },
@@ -127,10 +129,11 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
 }
 
 export const getSnapshot = () => call<AppSnapshot>("get_snapshot");
-export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.1.4");
+export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.1.5");
 export const refreshHardware = () => call<AppSnapshot>("refresh_hardware");
 export const testRecall = () => call<AppSnapshot>("test_recall");
 export const switchKeyboard = (channel: number) => call<AppSnapshot>("switch_keyboard", { channel });
+export const requestHidAccess = () => call<AppSnapshot>("request_hid_access");
 
 export async function saveConfig(config: AppConfig): Promise<AppSnapshot> {
   if (store) {

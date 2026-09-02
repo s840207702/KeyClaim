@@ -5,6 +5,7 @@
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/hid/IOHIDManager.h>
+#include <IOKit/hidsystem/IOHIDLib.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,18 @@ typedef struct {
 static uint8_t reply_buffer[64];
 static CFIndex reply_length;
 static int got_reply;
+
+int keyclaim_hid_access_status(void) {
+  if (__builtin_available(macOS 10.15, *))
+    return (int)IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
+  return (int)kIOHIDAccessTypeGranted;
+}
+
+int keyclaim_request_hid_access(void) {
+  if (__builtin_available(macOS 10.15, *))
+    return IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) ? 1 : 0;
+  return 1;
+}
 
 static int32_t property_int(IOHIDDeviceRef device, CFStringRef key) {
   CFTypeRef value = IOHIDDeviceGetProperty(device, key);

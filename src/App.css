@@ -84,6 +84,12 @@ main { width: min(100% - 48px, 900px); margin: 0 auto; padding: 24px 0 12px; }
 .toggle:disabled { opacity: 0.55; cursor: default; }
 
 .error-message { min-height: 42px; display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 9px 12px; color: #9d3636; background: #fff3f3; border: 1px solid #f0cccc; border-radius: 10px; font-size: 14px; }
+.permission-banner { min-height: 58px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 11px; margin-top: 14px; padding: 10px 12px; color: #7b5416; background: #fff9eb; border: 1px solid #efddb5; border-radius: 11px; }
+.permission-banner > div { display: flex; flex-direction: column; gap: 2px; }
+.permission-banner strong { color: #543a12; font-size: 14px; }
+.permission-banner span { font-size: 13px; }
+.permission-banner button { min-height: 34px; padding: 0 12px; color: #543a12; background: white; border: 1px solid #ddc58e; border-radius: 8px; font-size: 13px; font-weight: 650; cursor: pointer; }
+.permission-banner button:hover { background: #fffdf8; border-color: #c9aa63; }
 .status-footer { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 12px; padding: 0 2px; }
 .health { min-width: 0; display: flex; align-items: center; gap: 18px; color: var(--text-secondary); }
 .health span { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; white-space: nowrap; }
@@ -137,6 +143,9 @@ main { width: min(100% - 48px, 900px); margin: 0 auto; padding: 24px 0 12px; }
   .switch-button, .icon-button, .secondary-button { background: var(--surface); }
   .switch-button:hover, .icon-button:hover, .secondary-button:hover { background: #292d33; }
   .error-message { color: #ffb5b5; background: #382222; border-color: #603232; }
+  .permission-banner { color: #d9bd82; background: #30291d; border-color: #54462c; }
+  .permission-banner strong { color: #f2dbac; }
+  .permission-banner button { color: #f2dbac; background: #25211b; border-color: #685737; }
   .refresh-button:hover { background: rgb(255 255 255 / 0.06); }
   .modal-backdrop { background: rgb(0 0 0 / 0.48); }
 }
