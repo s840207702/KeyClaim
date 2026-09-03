@@ -110,7 +110,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\diagnose-windows.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\repair-windows-network.ps1
 ```
 
-脚本会请求一次管理员授权，只为当前 `keyclaim.exe` 添加“本地子网、UDP `45823`、入站允许”规则，然后重启 KeyClaim 并验证监听状态；不会开放公网来源，也不会读取或输出配对码。
+脚本会请求一次管理员授权，添加“本地子网、UDP `45823`、入站允许”规则，然后重启 KeyClaim 并验证监听状态。规则不绑定容易随安装升级变化的 exe 路径，不会开放公网来源，也不会读取或输出配对码。
 
 ## 验证
 

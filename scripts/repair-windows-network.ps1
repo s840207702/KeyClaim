@@ -61,7 +61,6 @@ New-NetFirewallRule `
     -Action Allow `
     -Enabled True `
     -Profile Any `
-    -Program $executable `
     -Protocol UDP `
     -LocalPort $port `
     -RemoteAddress LocalSubnet | Out-Null
@@ -83,6 +82,7 @@ $result = [ordered]@{
     firewallRule = if ($rule) { $rule.DisplayName } else { $null }
     firewallEnabled = if ($rule) { $rule.Enabled.ToString() } else { $null }
     firewallAction = if ($rule) { $rule.Action.ToString() } else { $null }
+    firewallScope = "LocalSubnet UDP/$port (all KeyClaim install paths)"
     udp45823Listening = [bool]$listener
     processId = if ($listener) { $listener.OwningProcess } else { $null }
 }
