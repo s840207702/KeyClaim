@@ -794,9 +794,10 @@ async fn handle_network_payload(
             if accepted {
                 add_activity(&mut state, "切换指令已送达", detail, "claim");
             } else {
-                state.pending_claim = false;
-                *pending_claim = None;
-                add_activity(&mut state, "召回未完成", detail, "error");
+                // 对端可能只是暂时拿不到接收器（例如刚唤醒或权限服务尚未恢复）。
+                // 保留同一个 nonce，让 drive_pending_claim 在短暂间隔后继续重试；
+                // 只有真实到达确认或统一超时才结束这次召回。
+                add_activity(&mut state, "切换暂未完成，正在重试", detail, "error");
             }
         }
         Payload::ArrivalConfirmed {
