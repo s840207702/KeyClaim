@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
@@ -307,12 +308,44 @@ async fn send_payload(
         (state.config.pairing_code.clone(), state.config.network_port)
     };
     if let Ok(bytes) = protocol::encode(payload, &code) {
-        let target = SocketAddrV4::new(Ipv4Addr::BROADCAST, port);
-        let _ = socket.send_to(&bytes, target).await;
+        for target in discovery_targets(port) {
+            let _ = socket.send_to(&bytes, target).await;
+        }
         if let Some(peer_addr) = peer_addr {
             let _ = socket.send_to(&bytes, peer_addr).await;
         }
     }
+}
+
+fn discovery_targets(port: u16) -> Vec<SocketAddrV4> {
+    let broadcasts = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|interface| {
+            interface.is_oper_up()
+                && !interface.is_loopback()
+                && !interface.is_link_local()
+                && !interface.is_p2p()
+        })
+        .filter_map(|interface| match interface.addr {
+            if_addrs::IfAddr::V4(address) => address.broadcast,
+            if_addrs::IfAddr::V6(_) => None,
+        });
+    targets_from_broadcasts(port, broadcasts)
+}
+
+fn targets_from_broadcasts(
+    port: u16,
+    broadcasts: impl IntoIterator<Item = Ipv4Addr>,
+) -> Vec<SocketAddrV4> {
+    let mut targets = BTreeSet::from([SocketAddrV4::new(Ipv4Addr::BROADCAST, port)]);
+    targets.extend(
+        broadcasts
+            .into_iter()
+            .filter(|address| !address.is_unspecified() && !address.is_loopback())
+            .map(|address| SocketAddrV4::new(address, port)),
+    );
+    targets.into_iter().collect()
 }
 
 async fn handle_network_payload(
@@ -575,6 +608,23 @@ mod tests {
                 .unwrap();
         let decoded = protocol::decode(&packet[..size], "KEYCLAIM").unwrap();
         assert!(matches!(decoded, Payload::Heartbeat { channel: 3, .. }));
+    }
+
+    #[test]
+    fn discovery_targets_include_every_interface_broadcast_once() {
+        let targets = targets_from_broadcasts(
+            45_823,
+            [
+                Ipv4Addr::new(192, 168, 1, 255),
+                Ipv4Addr::new(192, 168, 75, 255),
+                Ipv4Addr::new(192, 168, 1, 255),
+            ],
+        );
+
+        assert_eq!(targets.len(), 3);
+        assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::BROADCAST, 45_823)));
+        assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 255), 45_823,)));
+        assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::new(192, 168, 75, 255), 45_823,)));
     }
 }
 

@@ -34,6 +34,14 @@ $config = $null
 if (Test-Path $configPath) {
     $stored = Get-Content $configPath -Raw | ConvertFrom-Json
     if ($stored.config) {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $pairingBytes = [Text.Encoding]::UTF8.GetBytes([string]$stored.config.pairingCode)
+            $pairingHash = [BitConverter]::ToString($sha256.ComputeHash($pairingBytes)).Replace("-", "").Substring(0, 16)
+        }
+        finally {
+            $sha256.Dispose()
+        }
         $config = [ordered]@{
             hostName = $stored.config.hostName
             platform = $stored.config.platform
@@ -43,6 +51,7 @@ if (Test-Path $configPath) {
             autoRecall = $stored.config.autoRecall
             launchAtLogin = $stored.config.launchAtLogin
             pairingCodeConfigured = [bool]$stored.config.pairingCode
+            pairingCodeFingerprint = $pairingHash
         }
     }
 }
