@@ -38,6 +38,7 @@ const RECENT_CLAIM_LIMIT: usize = 128;
 const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(700);
 const CLAIM_TIMEOUT: Duration = Duration::from_millis(2_800);
 const CLAIM_MAX_ATTEMPTS: u8 = 3;
+const CLAIM_DUPLICATE_WINDOW: Duration = Duration::from_millis(500);
 
 enum LocalEvent {
     PointerActivity(PointerActivity),
@@ -53,6 +54,14 @@ struct PendingClaim {
     started_at: Instant,
     last_sent_at: Instant,
     attempts: u8,
+}
+
+#[derive(Clone, Debug)]
+struct RecentClaim {
+    nonce: String,
+    handled_at: Instant,
+    accepted: bool,
+    detail: String,
 }
 
 #[derive(Clone)]
@@ -671,7 +680,7 @@ async fn handle_network_payload(
     tcp_outgoing: &broadcast::Sender<Vec<u8>>,
     udp_source: Option<SocketAddr>,
     peer_addr: &mut Option<SocketAddr>,
-    recent_claims: &mut VecDeque<String>,
+    recent_claims: &mut VecDeque<RecentClaim>,
     pending_claim: &mut Option<PendingClaim>,
 ) {
     match payload {
@@ -726,17 +735,25 @@ async fn handle_network_payload(
             if let Some(source) = udp_source {
                 *peer_addr = Some(source);
             }
-            let result = if recent_claims.contains(&nonce) {
-                Ok(())
-            } else {
-                perform_switch(snapshot, channel)
-            };
-            if result.is_ok() && !recent_claims.contains(&nonce) {
-                recent_claims.push_back(nonce.clone());
+            let cached = cached_claim_result(recent_claims, &nonce);
+            let (accepted, detail) = cached.unwrap_or_else(|| {
+                let result = perform_switch(snapshot, channel);
+                let accepted = result.is_ok();
+                let detail = result
+                    .err()
+                    .unwrap_or_else(|| "切换指令已发送，等待目标端确认".into());
+                recent_claims.retain(|claim| claim.nonce != nonce);
+                recent_claims.push_back(RecentClaim {
+                    nonce: nonce.clone(),
+                    handled_at: Instant::now(),
+                    accepted,
+                    detail: detail.clone(),
+                });
                 while recent_claims.len() > RECENT_CLAIM_LIMIT {
                     recent_claims.pop_front();
                 }
-            }
+                (accepted, detail)
+            });
             let host_id = snapshot
                 .read()
                 .expect("snapshot poisoned")
@@ -747,10 +764,8 @@ async fn handle_network_payload(
                 host_id,
                 claim_nonce: nonce,
                 target_channel: channel,
-                accepted: result.is_ok(),
-                detail: result
-                    .err()
-                    .unwrap_or_else(|| "切换指令已发送，等待目标端确认".into()),
+                accepted,
+                detail,
                 sent_at_ms: now_ms(),
             };
             send_payload(socket, tcp_outgoing, snapshot, payload, *peer_addr).await;
@@ -810,6 +825,17 @@ async fn handle_network_payload(
             );
         }
     }
+}
+
+fn cached_claim_result(
+    recent_claims: &VecDeque<RecentClaim>,
+    nonce: &str,
+) -> Option<(bool, String)> {
+    recent_claims
+        .iter()
+        .find(|claim| claim.nonce == nonce)
+        .filter(|claim| claim.accepted || claim.handled_at.elapsed() < CLAIM_DUPLICATE_WINDOW)
+        .map(|claim| (claim.accepted, claim.detail.clone()))
 }
 
 fn begin_claim(snapshot: &Arc<RwLock<AppSnapshot>>, reason: &str) -> (PendingClaim, Payload) {
@@ -1079,6 +1105,31 @@ mod tests {
         assert!(pending.is_none());
         assert!(!snapshot.read().unwrap().pending_claim);
         assert_eq!(snapshot.read().unwrap().activities[0].title, "召回超时");
+    }
+
+    #[test]
+    fn duplicate_delivery_reuses_recent_failure_without_retouching_hardware() {
+        let recent = VecDeque::from([RecentClaim {
+            nonce: "same-claim".into(),
+            handled_at: Instant::now(),
+            accepted: false,
+            detail: "暂时无法访问接收器".into(),
+        }]);
+        assert_eq!(
+            cached_claim_result(&recent, "same-claim"),
+            Some((false, "暂时无法访问接收器".into()))
+        );
+    }
+
+    #[test]
+    fn failed_claim_can_be_retried_after_duplicate_window() {
+        let recent = VecDeque::from([RecentClaim {
+            nonce: "retryable".into(),
+            handled_at: Instant::now() - CLAIM_DUPLICATE_WINDOW,
+            accepted: false,
+            detail: "第一次失败".into(),
+        }]);
+        assert!(cached_claim_result(&recent, "retryable").is_none());
     }
 
     #[tokio::test]
