@@ -1,13 +1,20 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 #[cfg(not(target_os = "macos"))]
 use device_query::{DeviceQuery, DeviceState};
-use tokio::{net::UdpSocket, sync::mpsc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::{broadcast, mpsc},
+};
 
 use crate::{
     logitech,
@@ -18,6 +25,9 @@ use crate::{
 const PEER_STALE_MS: i64 = 4_000;
 const MESSAGE_MAX_AGE_MS: i64 = 5_000;
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(3);
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
+const TCP_FRAME_LIMIT: usize = 4_096;
+const RECENT_CLAIM_LIMIT: usize = 128;
 
 enum LocalEvent {
     PointerMoved,
@@ -196,20 +206,28 @@ async fn run_loop(
         .config
         .network_port;
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await.ok();
+    let tcp_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await.ok();
     if let Some(socket) = &socket {
         let _ = socket.set_broadcast(true);
+    }
+    if socket.is_some() || tcp_listener.is_some() {
         snapshot
             .write()
             .expect("snapshot poisoned")
             .diagnostics
             .network_listener = true;
     }
+    let (tcp_outgoing, _) = broadcast::channel::<Vec<u8>>(64);
+    let (tcp_incoming_sender, mut tcp_incoming) = mpsc::unbounded_channel::<Vec<u8>>();
+    let active_tcp_connections = Arc::new(AtomicUsize::new(0));
+    let tcp_scan_in_progress = Arc::new(AtomicBool::new(false));
     let mut packet = [0u8; 4_096];
     let mut heartbeat = tokio::time::interval(Duration::from_millis(900));
     let mut peer_discovery = tokio::time::interval(PEER_DISCOVERY_INTERVAL);
     let mut hardware_scan = tokio::time::interval(Duration::from_secs(2));
     let mut pending_since: Option<Instant> = None;
     let mut peer_addr: Option<SocketAddr> = None;
+    let mut recent_claims = VecDeque::new();
 
     loop {
         tokio::select! {
@@ -220,18 +238,32 @@ async fn run_loop(
                     pending_since = None;
                 }
                 if let Some(socket) = &socket {
-                    send_payload(socket, &snapshot, heartbeat_payload(&snapshot), peer_addr).await;
+                    send_payload(
+                        socket,
+                        &tcp_outgoing,
+                        &snapshot,
+                        heartbeat_payload(&snapshot),
+                        peer_addr,
+                    ).await;
                 }
             }
             _ = peer_discovery.tick() => {
-                let peer_is_offline = !snapshot
-                    .read()
-                    .expect("snapshot poisoned")
-                    .peer_host
-                    .online;
+                let (peer_is_offline, platform) = {
+                    let state = snapshot.read().expect("snapshot poisoned");
+                    (!state.peer_host.online, state.config.platform.clone())
+                };
                 if peer_is_offline {
                     if let Some(socket) = &socket {
                         send_discovery_sweep(socket, &snapshot).await;
+                    }
+                    if matches!(platform, crate::model::Platform::Windows) {
+                        start_tcp_discovery_sweep(
+                            port,
+                            tcp_outgoing.clone(),
+                            tcp_incoming_sender.clone(),
+                            active_tcp_connections.clone(),
+                            tcp_scan_in_progress.clone(),
+                        );
                     }
                 }
             }
@@ -263,7 +295,13 @@ async fn run_loop(
                         };
                         pending_since = Some(Instant::now());
                         if let Some(socket) = &socket {
-                            send_payload(socket, &snapshot, payload, peer_addr).await;
+                            send_payload(
+                                socket,
+                                &tcp_outgoing,
+                                &snapshot,
+                                payload,
+                                peer_addr,
+                            ).await;
                         }
                     }
                 }
@@ -287,14 +325,175 @@ async fn run_loop(
                             &snapshot,
                             payload,
                             socket.as_ref(),
-                            source,
+                            &tcp_outgoing,
+                            Some(source),
                             &mut peer_addr,
+                            &mut recent_claims,
+                        ).await;
+                    }
+                }
+            }
+            accepted = async {
+                match &tcp_listener {
+                    Some(listener) => listener.accept().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some((stream, _)) = accepted {
+                    spawn_tcp_connection(
+                        stream,
+                        tcp_outgoing.clone(),
+                        tcp_incoming_sender.clone(),
+                        active_tcp_connections.clone(),
+                    );
+                }
+            }
+            incoming = tcp_incoming.recv() => {
+                if let Some(bytes) = incoming {
+                    let code = snapshot.read().expect("snapshot poisoned").config.pairing_code.clone();
+                    if let Ok(payload) = protocol::decode(&bytes, &code) {
+                        handle_network_payload(
+                            &snapshot,
+                            payload,
+                            socket.as_ref(),
+                            &tcp_outgoing,
+                            None,
+                            &mut peer_addr,
+                            &mut recent_claims,
                         ).await;
                     }
                 }
             }
         }
     }
+}
+
+fn spawn_tcp_connection(
+    stream: TcpStream,
+    outgoing: broadcast::Sender<Vec<u8>>,
+    incoming: mpsc::UnboundedSender<Vec<u8>>,
+    active_connections: Arc<AtomicUsize>,
+) {
+    let mut outgoing = outgoing.subscribe();
+    tauri::async_runtime::spawn(async move {
+        active_connections.fetch_add(1, Ordering::Relaxed);
+        let (mut reader, mut writer) = stream.into_split();
+        loop {
+            tokio::select! {
+                frame = async {
+                    let length = reader.read_u32().await? as usize;
+                    if length == 0 || length > TCP_FRAME_LIMIT {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "TCP 消息长度无效",
+                        ));
+                    }
+                    let mut bytes = vec![0; length];
+                    reader.read_exact(&mut bytes).await?;
+                    Ok::<Vec<u8>, std::io::Error>(bytes)
+                } => match frame {
+                    Ok(bytes) => {
+                        if incoming.send(bytes).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                },
+                message = outgoing.recv() => match message {
+                    Ok(bytes) => {
+                        if writer.write_u32(bytes.len() as u32).await.is_err()
+                            || writer.write_all(&bytes).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+            }
+        }
+        active_connections.fetch_sub(1, Ordering::Relaxed);
+    });
+}
+
+fn start_tcp_discovery_sweep(
+    port: u16,
+    outgoing: broadcast::Sender<Vec<u8>>,
+    incoming: mpsc::UnboundedSender<Vec<u8>>,
+    active_connections: Arc<AtomicUsize>,
+    scan_in_progress: Arc<AtomicBool>,
+) {
+    if scan_in_progress.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let mut attempts = Vec::new();
+        for target in tcp_discovery_targets(port) {
+            attempts.push(tauri::async_runtime::spawn(async move {
+                tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(target))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            }));
+        }
+        for attempt in attempts {
+            if let Ok(Some(stream)) = attempt.await {
+                spawn_tcp_connection(
+                    stream,
+                    outgoing.clone(),
+                    incoming.clone(),
+                    active_connections.clone(),
+                );
+            }
+        }
+        scan_in_progress.store(false, Ordering::Release);
+    });
+}
+
+fn tcp_discovery_targets(port: u16) -> Vec<SocketAddrV4> {
+    let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+    let local_addresses: BTreeSet<Ipv4Addr> = interfaces
+        .iter()
+        .filter_map(|interface| match &interface.addr {
+            if_addrs::IfAddr::V4(address) => Some(address.ip),
+            if_addrs::IfAddr::V6(_) => None,
+        })
+        .collect();
+    let mut targets = BTreeSet::new();
+    for interface in interfaces.into_iter().filter(|interface| {
+        interface.is_oper_up()
+            && !interface.is_loopback()
+            && !interface.is_link_local()
+            && !interface.is_p2p()
+            && is_likely_lan_interface(&interface.name)
+    }) {
+        let if_addrs::IfAddr::V4(address) = interface.addr else {
+            continue;
+        };
+        targets.extend(subnet_probe_targets(address.ip, address.netmask, port));
+    }
+    targets.retain(|target| !local_addresses.contains(target.ip()));
+    targets.into_iter().collect()
+}
+
+fn is_likely_lan_interface(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ![
+        "bridge",
+        "docker",
+        "hyper-v",
+        "meta",
+        "tailscale",
+        "utun",
+        "vethernet",
+        "virtualbox",
+        "vmnet",
+        "vmware",
+        "wsl",
+        "zerotier",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
 }
 
 fn heartbeat_payload(snapshot: &Arc<RwLock<AppSnapshot>>) -> Payload {
@@ -313,6 +512,7 @@ fn heartbeat_payload(snapshot: &Arc<RwLock<AppSnapshot>>) -> Payload {
 
 async fn send_payload(
     socket: &UdpSocket,
+    tcp_outgoing: &broadcast::Sender<Vec<u8>>,
     snapshot: &Arc<RwLock<AppSnapshot>>,
     payload: Payload,
     peer_addr: Option<SocketAddr>,
@@ -328,6 +528,7 @@ async fn send_payload(
         if let Some(peer_addr) = peer_addr {
             let _ = socket.send_to(&bytes, peer_addr).await;
         }
+        let _ = tcp_outgoing.send(bytes);
     }
 }
 
@@ -429,8 +630,10 @@ async fn handle_network_payload(
     snapshot: &Arc<RwLock<AppSnapshot>>,
     payload: Payload,
     socket: Option<&UdpSocket>,
-    source: SocketAddr,
+    tcp_outgoing: &broadcast::Sender<Vec<u8>>,
+    udp_source: Option<SocketAddr>,
     peer_addr: &mut Option<SocketAddr>,
+    recent_claims: &mut VecDeque<String>,
 ) {
     match payload {
         Payload::Heartbeat {
@@ -448,7 +651,9 @@ async fn handle_network_payload(
             {
                 return;
             }
-            *peer_addr = Some(source);
+            if let Some(source) = udp_source {
+                *peer_addr = Some(source);
+            }
             let was_offline = !state.peer_host.online;
             state.peer_host.name = host_name;
             state.peer_host.platform = platform;
@@ -469,8 +674,8 @@ async fn handle_network_payload(
         Payload::Claim {
             host_id,
             channel,
+            nonce,
             sent_at_ms,
-            ..
         } => {
             let allowed = {
                 let state = snapshot.read().expect("snapshot poisoned");
@@ -485,7 +690,16 @@ async fn handle_network_payload(
             if !allowed {
                 return;
             }
-            *peer_addr = Some(source);
+            if recent_claims.contains(&nonce) {
+                return;
+            }
+            recent_claims.push_back(nonce);
+            while recent_claims.len() > RECENT_CLAIM_LIMIT {
+                recent_claims.pop_front();
+            }
+            if let Some(source) = udp_source {
+                *peer_addr = Some(source);
+            }
             let result = perform_switch(snapshot, channel);
             if let Some(socket) = socket {
                 let host_id = snapshot
@@ -501,7 +715,7 @@ async fn handle_network_payload(
                     detail: result.err().unwrap_or_else(|| "键盘已切换".into()),
                     sent_at_ms: now_ms(),
                 };
-                send_payload(socket, snapshot, payload, *peer_addr).await;
+                send_payload(socket, tcp_outgoing, snapshot, payload, *peer_addr).await;
             }
         }
         Payload::SwitchResult {
@@ -516,7 +730,9 @@ async fn handle_network_payload(
             {
                 return;
             }
-            *peer_addr = Some(source);
+            if let Some(source) = udp_source {
+                *peer_addr = Some(source);
+            }
             state.pending_claim = false;
             if success {
                 state.keyboard.current_channel = Some(target_channel);
@@ -669,8 +885,10 @@ mod tests {
         let mut state = mac_snapshot();
         state.config.network_port = 59_999;
         let snapshot = Arc::new(RwLock::new(state));
+        let (tcp_outgoing, _) = broadcast::channel(4);
         send_payload(
             &sender,
+            &tcp_outgoing,
             &snapshot,
             heartbeat_payload(&snapshot),
             Some(peer_addr),
@@ -685,6 +903,40 @@ mod tests {
                 .unwrap();
         let decoded = protocol::decode(&packet[..size], "KEYCLAIM").unwrap();
         assert!(matches!(decoded, Payload::Heartbeat { channel: 3, .. }));
+    }
+
+    #[tokio::test]
+    async fn tcp_connection_forwards_framed_messages_both_ways() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (outgoing, _) = broadcast::channel(4);
+        let (incoming_sender, mut incoming) = mpsc::unbounded_channel();
+        let active = Arc::new(AtomicUsize::new(0));
+
+        spawn_tcp_connection(server, outgoing.clone(), incoming_sender, active.clone());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        client.write_u32(9).await.unwrap();
+        client.write_all(b"from-peer").await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(1), incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, b"from-peer");
+
+        outgoing.send(b"to-peer".to_vec()).unwrap();
+        let length = client.read_u32().await.unwrap();
+        let mut received = vec![0; length as usize];
+        client.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, b"to-peer");
     }
 
     #[test]
@@ -743,6 +995,21 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn tcp_discovery_skips_common_virtual_interfaces() {
+        for name in [
+            "vEthernet (WSL (Hyper-V firewall))",
+            "VMware Network Adapter VMnet8",
+            "Meta",
+            "utun5",
+        ] {
+            assert!(!is_likely_lan_interface(name), "{name} 应被忽略");
+        }
+        assert!(is_likely_lan_interface("以太网"));
+        assert!(is_likely_lan_interface("Wi-Fi"));
+        assert!(is_likely_lan_interface("en7"));
     }
 }
 
