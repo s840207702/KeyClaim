@@ -251,7 +251,10 @@ async fn run_loop(
                     let state = snapshot.read().expect("snapshot poisoned");
                     (!state.peer_host.online, state.config.platform.clone())
                 };
-                if peer_is_offline {
+                if should_start_tcp_discovery(
+                    peer_is_offline,
+                    active_tcp_connections.load(Ordering::Relaxed),
+                ) {
                     if matches!(platform, crate::model::Platform::Windows) {
                         start_tcp_discovery_sweep(
                             port,
@@ -772,10 +775,12 @@ async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) {
 
 fn should_request_claim(state: &AppSnapshot) -> bool {
     state.config.auto_recall
-        && state.peer_host.online
-        && state.peer_host.ready
         && state.keyboard.current_channel != Some(state.config.channel)
         && !state.pending_claim
+}
+
+fn should_start_tcp_discovery(peer_is_offline: bool, active_connections: usize) -> bool {
+    peer_is_offline && active_connections == 0
 }
 
 fn record_peer_keyboard_channel(
@@ -811,6 +816,23 @@ mod tests {
         let mut state = mac_snapshot();
         state.keyboard.current_channel = None;
         assert!(should_request_claim(&state));
+    }
+
+    #[test]
+    fn offline_peer_cache_does_not_block_keyboard_request() {
+        let mut state = mac_snapshot();
+        state.peer_host.online = false;
+        state.peer_host.ready = false;
+        state.keyboard.current_channel = None;
+
+        assert!(should_request_claim(&state));
+    }
+
+    #[test]
+    fn existing_tcp_connection_prevents_duplicate_discovery_sweep() {
+        assert!(should_start_tcp_discovery(true, 0));
+        assert!(!should_start_tcp_discovery(true, 1));
+        assert!(!should_start_tcp_discovery(false, 0));
     }
 
     #[test]
