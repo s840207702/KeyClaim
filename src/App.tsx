@@ -87,7 +87,7 @@ function App() {
   const [busyChannel, setBusyChannel] = useState<number>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [message, setMessage] = useState<string>();
-  const [appVersion, setAppVersion] = useState("0.1.8");
+  const [appVersion, setAppVersion] = useState("0.1.9");
 
   useEffect(() => {
     let mounted = true;

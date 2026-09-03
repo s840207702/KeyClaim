@@ -224,6 +224,7 @@ async fn run_loop(
     let mut packet = [0u8; 4_096];
     let mut heartbeat = tokio::time::interval(Duration::from_millis(900));
     let mut peer_discovery = tokio::time::interval(PEER_DISCOVERY_INTERVAL);
+    peer_discovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut hardware_scan = tokio::time::interval(Duration::from_secs(2));
     let mut pending_since: Option<Instant> = None;
     let mut peer_addr: Option<SocketAddr> = None;
@@ -237,15 +238,13 @@ async fn run_loop(
                     snapshot.write().expect("snapshot poisoned").pending_claim = false;
                     pending_since = None;
                 }
-                if let Some(socket) = &socket {
-                    send_payload(
-                        socket,
-                        &tcp_outgoing,
-                        &snapshot,
-                        heartbeat_payload(&snapshot),
-                        peer_addr,
-                    ).await;
-                }
+                send_payload(
+                    socket.as_ref(),
+                    &tcp_outgoing,
+                    &snapshot,
+                    heartbeat_payload(&snapshot),
+                    peer_addr,
+                ).await;
             }
             _ = peer_discovery.tick() => {
                 let (peer_is_offline, platform) = {
@@ -253,9 +252,6 @@ async fn run_loop(
                     (!state.peer_host.online, state.config.platform.clone())
                 };
                 if peer_is_offline {
-                    if let Some(socket) = &socket {
-                        send_discovery_sweep(socket, &snapshot).await;
-                    }
                     if matches!(platform, crate::model::Platform::Windows) {
                         start_tcp_discovery_sweep(
                             port,
@@ -294,15 +290,13 @@ async fn run_loop(
                             }
                         };
                         pending_since = Some(Instant::now());
-                        if let Some(socket) = &socket {
-                            send_payload(
-                                socket,
-                                &tcp_outgoing,
-                                &snapshot,
-                                payload,
-                                peer_addr,
-                            ).await;
-                        }
+                        send_payload(
+                            socket.as_ref(),
+                            &tcp_outgoing,
+                            &snapshot,
+                            payload,
+                            peer_addr,
+                        ).await;
                     }
                 }
                 Some(LocalEvent::RefreshHardware) => refresh_keyboard(&snapshot).await,
@@ -511,7 +505,7 @@ fn heartbeat_payload(snapshot: &Arc<RwLock<AppSnapshot>>) -> Payload {
 }
 
 async fn send_payload(
-    socket: &UdpSocket,
+    socket: Option<&UdpSocket>,
     tcp_outgoing: &broadcast::Sender<Vec<u8>>,
     snapshot: &Arc<RwLock<AppSnapshot>>,
     payload: Payload,
@@ -522,13 +516,15 @@ async fn send_payload(
         (state.config.pairing_code.clone(), state.config.network_port)
     };
     if let Ok(bytes) = protocol::encode(payload, &code) {
-        for target in discovery_targets(port) {
-            let _ = socket.send_to(&bytes, target).await;
+        let _ = tcp_outgoing.send(bytes.clone());
+        if let Some(socket) = socket {
+            for target in discovery_targets(port) {
+                let _ = socket.send_to(&bytes, target).await;
+            }
+            if let Some(peer_addr) = peer_addr {
+                let _ = socket.send_to(&bytes, peer_addr).await;
+            }
         }
-        if let Some(peer_addr) = peer_addr {
-            let _ = socket.send_to(&bytes, peer_addr).await;
-        }
-        let _ = tcp_outgoing.send(bytes);
     }
 }
 
@@ -547,48 +543,6 @@ fn discovery_targets(port: u16) -> Vec<SocketAddrV4> {
             if_addrs::IfAddr::V6(_) => None,
         });
     targets_from_broadcasts(port, broadcasts)
-}
-
-async fn send_discovery_sweep(socket: &UdpSocket, snapshot: &Arc<RwLock<AppSnapshot>>) {
-    let payload = heartbeat_payload(snapshot);
-    let (code, port) = {
-        let state = snapshot.read().expect("snapshot poisoned");
-        (state.config.pairing_code.clone(), state.config.network_port)
-    };
-    let Ok(bytes) = protocol::encode(payload, &code) else {
-        return;
-    };
-    for (index, target) in discovery_unicast_targets(port).into_iter().enumerate() {
-        let _ = socket.send_to(&bytes, target).await;
-        if index % 64 == 63 {
-            tokio::task::yield_now().await;
-        }
-    }
-}
-
-fn discovery_unicast_targets(port: u16) -> Vec<SocketAddrV4> {
-    let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
-    let local_addresses: BTreeSet<Ipv4Addr> = interfaces
-        .iter()
-        .filter_map(|interface| match &interface.addr {
-            if_addrs::IfAddr::V4(address) => Some(address.ip),
-            if_addrs::IfAddr::V6(_) => None,
-        })
-        .collect();
-    let mut targets = BTreeSet::new();
-    for interface in interfaces.into_iter().filter(|interface| {
-        interface.is_oper_up()
-            && !interface.is_loopback()
-            && !interface.is_link_local()
-            && !interface.is_p2p()
-    }) {
-        let if_addrs::IfAddr::V4(address) = interface.addr else {
-            continue;
-        };
-        targets.extend(subnet_probe_targets(address.ip, address.netmask, port));
-    }
-    targets.retain(|target| !local_addresses.contains(target.ip()));
-    targets.into_iter().collect()
 }
 
 fn subnet_probe_targets(ip: Ipv4Addr, netmask: Ipv4Addr, port: u16) -> Vec<SocketAddrV4> {
@@ -701,22 +655,20 @@ async fn handle_network_payload(
                 *peer_addr = Some(source);
             }
             let result = perform_switch(snapshot, channel);
-            if let Some(socket) = socket {
-                let host_id = snapshot
-                    .read()
-                    .expect("snapshot poisoned")
-                    .config
-                    .host_id
-                    .clone();
-                let payload = Payload::SwitchResult {
-                    host_id,
-                    target_channel: channel,
-                    success: result.is_ok(),
-                    detail: result.err().unwrap_or_else(|| "键盘已切换".into()),
-                    sent_at_ms: now_ms(),
-                };
-                send_payload(socket, tcp_outgoing, snapshot, payload, *peer_addr).await;
-            }
+            let host_id = snapshot
+                .read()
+                .expect("snapshot poisoned")
+                .config
+                .host_id
+                .clone();
+            let payload = Payload::SwitchResult {
+                host_id,
+                target_channel: channel,
+                success: result.is_ok(),
+                detail: result.err().unwrap_or_else(|| "键盘已切换".into()),
+                sent_at_ms: now_ms(),
+            };
+            send_payload(socket, tcp_outgoing, snapshot, payload, *peer_addr).await;
         }
         Payload::SwitchResult {
             host_id,
@@ -887,7 +839,7 @@ mod tests {
         let snapshot = Arc::new(RwLock::new(state));
         let (tcp_outgoing, _) = broadcast::channel(4);
         send_payload(
-            &sender,
+            Some(&sender),
             &tcp_outgoing,
             &snapshot,
             heartbeat_payload(&snapshot),
@@ -937,6 +889,42 @@ mod tests {
         let mut received = vec![0; length as usize];
         client.read_exact(&mut received).await.unwrap();
         assert_eq!(received, b"to-peer");
+    }
+
+    #[tokio::test]
+    async fn tcp_heartbeat_does_not_depend_on_udp_listener() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (outgoing, _) = broadcast::channel(4);
+        let (incoming_sender, _) = mpsc::unbounded_channel();
+        let active = Arc::new(AtomicUsize::new(0));
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+
+        spawn_tcp_connection(server, outgoing.clone(), incoming_sender, active.clone());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        send_payload(
+            None,
+            &outgoing,
+            &snapshot,
+            heartbeat_payload(&snapshot),
+            None,
+        )
+        .await;
+
+        let length = client.read_u32().await.unwrap();
+        let mut received = vec![0; length as usize];
+        client.read_exact(&mut received).await.unwrap();
+        let decoded = protocol::decode(&received, "KEYCLAIM").unwrap();
+        assert!(matches!(decoded, Payload::Heartbeat { channel: 3, .. }));
     }
 
     #[test]

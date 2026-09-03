@@ -1,7 +1,7 @@
 {
   "name": "keyclaim",
   "private": true,
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "让 MX Keys 跟随本地人工输入，在 Windows 与 macOS 之间自动归位。",
   "type": "module",
   "scripts": {
