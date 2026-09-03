@@ -104,6 +104,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\diagnose-windows.ps1
 
 脚本只读取 KeyClaim 进程、UDP `45823` 监听、防火墙规则、网卡、配置摘要和 Logitech HID 设备，不会输出配对码，也不会修改系统设置。
 
+如果诊断显示 KeyClaim 已启动但另一台电脑仍收不到心跳，可执行一次 Windows 网络修复：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\repair-windows-network.ps1
+```
+
+脚本会请求一次管理员授权，只为当前 `keyclaim.exe` 添加“本地子网、UDP `45823`、入站允许”规则，然后重启 KeyClaim 并验证监听状态；不会开放公网来源，也不会读取或输出配对码。
+
 ## 验证
 
 ```bash

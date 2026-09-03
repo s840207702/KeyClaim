@@ -33,8 +33,10 @@ jobs:
       - name: 检查 Windows 诊断脚本语法
         shell: pwsh
         run: |
-          $source = Get-Content .\scripts\diagnose-windows.ps1 -Raw
-          [void][scriptblock]::Create($source)
+          Get-ChildItem .\scripts\*.ps1 | ForEach-Object {
+            $source = Get-Content $_.FullName -Raw
+            [void][scriptblock]::Create($source)
+          }
 
       - name: 构建 Windows 安装包
         run: npm run tauri build -- --bundles nsis
