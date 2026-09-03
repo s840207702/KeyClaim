@@ -152,7 +152,11 @@ impl AppSnapshot {
                 network_listener: false,
                 hid_access: !cfg!(target_os = "macos"),
                 receiver_probe: false,
-                synthetic_filter_mode: "实验性：当前按光标位移识别".into(),
+                synthetic_filter_mode: if cfg!(target_os = "windows") {
+                    "Windows Raw Input · 仅物理鼠标".into()
+                } else {
+                    "macOS CGEventTap · 过滤合成事件".into()
+                },
             },
             activities: vec![],
             last_local_input_ms: None,

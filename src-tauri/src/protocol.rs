@@ -24,11 +24,18 @@ pub enum Payload {
         nonce: String,
         sent_at_ms: i64,
     },
-    SwitchResult {
+    SwitchDispatched {
         host_id: String,
+        claim_nonce: String,
         target_channel: u8,
-        success: bool,
+        accepted: bool,
         detail: String,
+        sent_at_ms: i64,
+    },
+    ArrivalConfirmed {
+        host_id: String,
+        claim_nonce: String,
+        channel: u8,
         sent_at_ms: i64,
     },
 }
@@ -102,6 +109,21 @@ mod tests {
         assert!(matches!(
             decode(&encoded, "other"),
             Err(ProtocolError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn arrival_confirmation_round_trips() {
+        let payload = Payload::ArrivalConfirmed {
+            host_id: "mac".into(),
+            claim_nonce: "claim-1".into(),
+            channel: 3,
+            sent_at_ms: 42,
+        };
+        let encoded = encode(payload, "secret").unwrap();
+        assert!(matches!(
+            decode(&encoded, "secret").unwrap(),
+            Payload::ArrivalConfirmed { channel: 3, .. }
         ));
     }
 }

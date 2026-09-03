@@ -1,3 +1,4 @@
+mod input;
 mod logitech;
 mod model;
 mod protocol;

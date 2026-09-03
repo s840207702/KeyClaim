@@ -100,7 +100,7 @@ const browserSnapshot: AppSnapshot = {
     networkListener: true,
     hidAccess: true,
     receiverProbe: true,
-    syntheticFilterMode: "实验性：当前按光标位移识别",
+    syntheticFilterMode: "macOS CGEventTap · 过滤合成事件",
   },
   activities: [
     { id: "1", timestamp: "10:42:18", title: "键盘已归位", detail: "MX Keys → MacBook Pro · 通道 3", kind: "success" },
@@ -129,7 +129,7 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
 }
 
 export const getSnapshot = () => call<AppSnapshot>("get_snapshot");
-export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.1.9");
+export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.2.0");
 export const refreshHardware = () => call<AppSnapshot>("refresh_hardware");
 export const testRecall = () => call<AppSnapshot>("test_recall");
 export const switchKeyboard = (channel: number) => call<AppSnapshot>("switch_keyboard", { channel });

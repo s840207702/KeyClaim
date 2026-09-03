@@ -1,0 +1,52 @@
+name: 双平台验证
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon 兼容构建
+            os: macos-14
+          - name: Windows x64 兼容构建
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 运行前端测试
+        run: npm test
+
+      - name: 检查前端构建
+        run: npm run build
+
+      - name: 检查 Rust 格式
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: 运行 Rust 测试
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: 构建桌面安装包
+        run: npm run tauri build

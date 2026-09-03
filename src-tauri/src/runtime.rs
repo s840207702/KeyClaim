@@ -8,8 +8,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(not(target_os = "macos"))]
-use device_query::{DeviceQuery, DeviceState};
+#[cfg(not(test))]
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    sync::OnceLock,
+};
+
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -17,6 +23,7 @@ use tokio::{
 };
 
 use crate::{
+    input::{self, InputIntentGate, PointerActivity},
     logitech,
     model::{ActivityEntry, AppConfig, AppSnapshot},
     protocol::{self, Payload},
@@ -28,11 +35,24 @@ const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(3);
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
 const TCP_FRAME_LIMIT: usize = 4_096;
 const RECENT_CLAIM_LIMIT: usize = 128;
+const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(700);
+const CLAIM_TIMEOUT: Duration = Duration::from_millis(2_800);
+const CLAIM_MAX_ATTEMPTS: u8 = 3;
 
 enum LocalEvent {
-    PointerMoved,
+    PointerActivity(PointerActivity),
+    InputMonitorStatus(bool),
     RefreshHardware,
     ManualSwitch(u8),
+}
+
+#[derive(Clone, Debug)]
+struct PendingClaim {
+    nonce: String,
+    channel: u8,
+    started_at: Instant,
+    last_sent_at: Instant,
+    attempts: u8,
 }
 
 #[derive(Clone)]
@@ -72,7 +92,13 @@ impl Runtime {
     }
 
     pub fn request_claim(&self) {
-        let _ = self.events.send(LocalEvent::PointerMoved);
+        let _ = self
+            .events
+            .send(LocalEvent::PointerActivity(PointerActivity {
+                delta_x: i32::MAX,
+                delta_y: 0,
+                synthetic: false,
+            }));
     }
 
     pub fn request_hid_access(&self) -> AppSnapshot {
@@ -93,7 +119,16 @@ impl Runtime {
     }
 
     fn start(&self, receiver: mpsc::UnboundedReceiver<LocalEvent>) {
-        start_input_monitor(self.snapshot.clone(), self.events.clone());
+        let input_events = self.events.clone();
+        let status_events = self.events.clone();
+        input::start_monitor(
+            move |activity| {
+                let _ = input_events.send(LocalEvent::PointerActivity(activity));
+            },
+            move |ready| {
+                let _ = status_events.send(LocalEvent::InputMonitorStatus(ready));
+            },
+        );
         tauri::async_runtime::spawn(run_loop(self.snapshot.clone(), receiver));
     }
 }
@@ -103,6 +138,8 @@ fn now_ms() -> i64 {
 }
 
 fn add_activity(snapshot: &mut AppSnapshot, title: &str, detail: String, kind: &str) {
+    #[cfg(not(test))]
+    write_diagnostic_log(kind, title, &detail);
     snapshot.activities.insert(
         0,
         ActivityEntry {
@@ -116,84 +153,40 @@ fn add_activity(snapshot: &mut AppSnapshot, title: &str, detail: String, kind: &
     snapshot.activities.truncate(8);
 }
 
-fn monitor_pointer<F>(
-    snapshot: Arc<RwLock<AppSnapshot>>,
-    events: mpsc::UnboundedSender<LocalEvent>,
-    mut read_position: F,
-) where
-    F: FnMut() -> Option<(i32, i32)>,
-{
-    let Some(mut last) = read_position() else {
+#[cfg(not(test))]
+fn diagnostic_log_path() -> Option<&'static PathBuf> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        dirs::data_local_dir().map(|root| root.join("KeyClaim").join("keyclaim.log"))
+    })
+    .as_ref()
+}
+
+#[cfg(not(test))]
+fn write_diagnostic_log(kind: &str, title: &str, detail: &str) {
+    let Some(path) = diagnostic_log_path() else {
         return;
     };
-    snapshot
-        .write()
-        .expect("snapshot poisoned")
-        .diagnostics
-        .input_monitor = true;
-    let mut last_trigger = Instant::now() - Duration::from_secs(2);
-    loop {
-        std::thread::sleep(Duration::from_millis(16));
-        let Some(current) = read_position() else {
-            snapshot
-                .write()
-                .expect("snapshot poisoned")
-                .diagnostics
-                .input_monitor = false;
-            continue;
-        };
-        let (threshold, debounce, enabled) = {
-            let state = snapshot.read().expect("snapshot poisoned");
-            (
-                state.config.movement_threshold,
-                state.config.debounce_ms,
-                state.config.auto_recall,
-            )
-        };
-        let distance = (current.0 - last.0).abs() + (current.1 - last.1).abs();
-        last = current;
-        if enabled
-            && distance >= threshold
-            && last_trigger.elapsed() >= Duration::from_millis(debounce)
-        {
-            last_trigger = Instant::now();
-            let _ = events.send(LocalEvent::PointerMoved);
-        }
+    if let Some(parent) = path.parent()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return;
     }
-}
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn keyclaim_get_cursor_position(x: *mut i32, y: *mut i32) -> i32;
-}
-
-#[cfg(target_os = "macos")]
-fn start_input_monitor(
-    snapshot: Arc<RwLock<AppSnapshot>>,
-    events: mpsc::UnboundedSender<LocalEvent>,
-) {
-    std::thread::spawn(move || {
-        monitor_pointer(snapshot, events, || {
-            let mut x = 0;
-            let mut y = 0;
-            // SAFETY: 原生函数只在调用期间写入两个有效的定长整数指针。
-            let success = unsafe { keyclaim_get_cursor_position(&mut x, &mut y) };
-            (success != 0).then_some((x, y))
-        });
-    });
-}
-
-#[cfg(not(target_os = "macos"))]
-fn start_input_monitor(
-    snapshot: Arc<RwLock<AppSnapshot>>,
-    events: mpsc::UnboundedSender<LocalEvent>,
-) {
-    std::thread::spawn(move || {
-        let Some(device_state) = DeviceState::checked_new() else {
-            return;
-        };
-        monitor_pointer(snapshot, events, || Some(device_state.get_mouse().coords));
-    });
+    if let Ok(metadata) = fs::metadata(path)
+        && metadata.len() > 1_000_000
+    {
+        let _ = fs::rename(path, path.with_extension("log.previous"));
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(
+            file,
+            "{}\t{}\t{}\t{}",
+            chrono::Local::now().to_rfc3339(),
+            kind,
+            title.replace(['\t', '\n'], " "),
+            detail.replace(['\t', '\n'], " ")
+        );
+    }
 }
 
 async fn run_loop(
@@ -225,8 +218,10 @@ async fn run_loop(
     let mut heartbeat = tokio::time::interval(Duration::from_millis(900));
     let mut peer_discovery = tokio::time::interval(PEER_DISCOVERY_INTERVAL);
     peer_discovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut hardware_scan = tokio::time::interval(Duration::from_secs(2));
-    let mut pending_since: Option<Instant> = None;
+    let mut hardware_scan = tokio::time::interval(Duration::from_millis(500));
+    hardware_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut pending_claim: Option<PendingClaim> = None;
+    let mut intent_gate = InputIntentGate::new();
     let mut peer_addr: Option<SocketAddr> = None;
     let mut recent_claims = VecDeque::new();
 
@@ -234,9 +229,14 @@ async fn run_loop(
         tokio::select! {
             _ = heartbeat.tick() => {
                 mark_stale_peer(&snapshot);
-                if pending_since.is_some_and(|at| at.elapsed() > Duration::from_millis(1_500)) {
-                    snapshot.write().expect("snapshot poisoned").pending_claim = false;
-                    pending_since = None;
+                if let Some(payload) = drive_pending_claim(&snapshot, &mut pending_claim) {
+                    send_payload(
+                        socket.as_ref(),
+                        &tcp_outgoing,
+                        &snapshot,
+                        payload,
+                        peer_addr,
+                    ).await;
                 }
                 send_payload(
                     socket.as_ref(),
@@ -266,33 +266,65 @@ async fn run_loop(
                     }
                 }
             }
-            _ = hardware_scan.tick() => refresh_keyboard(&snapshot).await,
+            _ = hardware_scan.tick() => {
+                let local_channel = refresh_keyboard(&snapshot).await;
+                if let (Some(channel), Some(claim)) = (local_channel, pending_claim.as_ref())
+                    && channel == claim.channel
+                {
+                    let claim_nonce = claim.nonce.clone();
+                    pending_claim = None;
+                    {
+                        let mut state = snapshot.write().expect("snapshot poisoned");
+                        state.pending_claim = false;
+                        add_activity(
+                            &mut state,
+                            "键盘已归位",
+                            format!("目标端已确认 MX Keys 上线 · 通道 {channel}"),
+                            "success",
+                        );
+                    }
+                    let host_id = snapshot.read().expect("snapshot poisoned").config.host_id.clone();
+                    send_payload(
+                        socket.as_ref(),
+                        &tcp_outgoing,
+                        &snapshot,
+                        Payload::ArrivalConfirmed {
+                            host_id,
+                            claim_nonce,
+                            channel,
+                            sent_at_ms: now_ms(),
+                        },
+                        peer_addr,
+                    ).await;
+                }
+            },
             event = events.recv() => match event {
-                Some(LocalEvent::PointerMoved) => {
+                Some(LocalEvent::PointerActivity(activity)) => {
+                    let (threshold, debounce, ignore_synthetic) = {
+                        let state = snapshot.read().expect("snapshot poisoned");
+                        (
+                            state.config.movement_threshold,
+                            Duration::from_millis(state.config.debounce_ms),
+                            state.config.ignore_synthetic_input,
+                        )
+                    };
+                    if !intent_gate.observe(
+                        activity,
+                        threshold,
+                        debounce,
+                        ignore_synthetic,
+                        Instant::now(),
+                    ) {
+                        continue;
+                    }
                     let should_claim = {
                         let mut state = snapshot.write().expect("snapshot poisoned");
                         state.last_local_input_ms = Some(now_ms());
                         should_request_claim(&state)
                     };
                     if should_claim {
-                        let payload = {
-                            let mut state = snapshot.write().expect("snapshot poisoned");
-                            state.pending_claim = true;
-                            let channel = state.config.channel;
-                            add_activity(
-                                &mut state,
-                                "检测到本地输入",
-                                format!("正在向通道 {channel} 召回键盘"),
-                                "claim",
-                            );
-                            Payload::Claim {
-                                host_id: state.config.host_id.clone(),
-                                channel: state.config.channel,
-                                nonce: uuid::Uuid::new_v4().to_string(),
-                                sent_at_ms: now_ms(),
-                            }
-                        };
-                        pending_since = Some(Instant::now());
+                        let (pending, payload) = begin_claim(&snapshot, "检测到本地物理输入");
+                        pending_claim = Some(pending);
                         send_payload(
                             socket.as_ref(),
                             &tcp_outgoing,
@@ -302,10 +334,47 @@ async fn run_loop(
                         ).await;
                     }
                 }
-                Some(LocalEvent::RefreshHardware) => refresh_keyboard(&snapshot).await,
+                Some(LocalEvent::InputMonitorStatus(ready)) => {
+                    let mut state = snapshot.write().expect("snapshot poisoned");
+                    let was_ready = state.diagnostics.input_monitor;
+                    if was_ready == ready {
+                        continue;
+                    }
+                    state.diagnostics.input_monitor = ready;
+                    if ready {
+                        add_activity(
+                            &mut state,
+                            "输入监听已就绪",
+                            "正在监听本机真实鼠标与触控板事件".into(),
+                            "success",
+                        );
+                    } else if was_ready {
+                        add_activity(
+                            &mut state,
+                            "输入监听未就绪",
+                            "系统原生输入事件流将在后台自动重试".into(),
+                            "error",
+                        );
+                    }
+                }
+                Some(LocalEvent::RefreshHardware) => {
+                    let _ = refresh_keyboard(&snapshot).await;
+                }
                 Some(LocalEvent::ManualSwitch(channel)) => {
-                    let _ = perform_switch(&snapshot, channel);
-                    refresh_keyboard(&snapshot).await;
+                    let local_channel = snapshot.read().expect("snapshot poisoned").config.channel;
+                    if channel == local_channel {
+                        let (pending, payload) = begin_claim(&snapshot, "手动召回键盘");
+                        pending_claim = Some(pending);
+                        send_payload(
+                            socket.as_ref(),
+                            &tcp_outgoing,
+                            &snapshot,
+                            payload,
+                            peer_addr,
+                        ).await;
+                    } else {
+                        let _ = perform_switch(&snapshot, channel);
+                    }
                 }
                 None => break,
             },
@@ -326,6 +395,7 @@ async fn run_loop(
                             Some(source),
                             &mut peer_addr,
                             &mut recent_claims,
+                            &mut pending_claim,
                         ).await;
                     }
                 }
@@ -357,6 +427,7 @@ async fn run_loop(
                             None,
                             &mut peer_addr,
                             &mut recent_claims,
+                            &mut pending_claim,
                         ).await;
                     }
                 }
@@ -601,6 +672,7 @@ async fn handle_network_payload(
     udp_source: Option<SocketAddr>,
     peer_addr: &mut Option<SocketAddr>,
     recent_claims: &mut VecDeque<String>,
+    pending_claim: &mut Option<PendingClaim>,
 ) {
     match payload {
         Payload::Heartbeat {
@@ -651,36 +723,43 @@ async fn handle_network_payload(
             if !allowed {
                 return;
             }
-            if recent_claims.contains(&nonce) {
-                return;
-            }
-            recent_claims.push_back(nonce);
-            while recent_claims.len() > RECENT_CLAIM_LIMIT {
-                recent_claims.pop_front();
-            }
             if let Some(source) = udp_source {
                 *peer_addr = Some(source);
             }
-            let result = perform_switch(snapshot, channel);
+            let result = if recent_claims.contains(&nonce) {
+                Ok(())
+            } else {
+                perform_switch(snapshot, channel)
+            };
+            if result.is_ok() && !recent_claims.contains(&nonce) {
+                recent_claims.push_back(nonce.clone());
+                while recent_claims.len() > RECENT_CLAIM_LIMIT {
+                    recent_claims.pop_front();
+                }
+            }
             let host_id = snapshot
                 .read()
                 .expect("snapshot poisoned")
                 .config
                 .host_id
                 .clone();
-            let payload = Payload::SwitchResult {
+            let payload = Payload::SwitchDispatched {
                 host_id,
+                claim_nonce: nonce,
                 target_channel: channel,
-                success: result.is_ok(),
-                detail: result.err().unwrap_or_else(|| "键盘已切换".into()),
+                accepted: result.is_ok(),
+                detail: result
+                    .err()
+                    .unwrap_or_else(|| "切换指令已发送，等待目标端确认".into()),
                 sent_at_ms: now_ms(),
             };
             send_payload(socket, tcp_outgoing, snapshot, payload, *peer_addr).await;
         }
-        Payload::SwitchResult {
+        Payload::SwitchDispatched {
             host_id,
+            claim_nonce,
             target_channel,
-            success,
+            accepted,
             detail,
             sent_at_ms,
         } => {
@@ -692,15 +771,109 @@ async fn handle_network_payload(
             if let Some(source) = udp_source {
                 *peer_addr = Some(source);
             }
-            state.pending_claim = false;
-            if success {
-                state.keyboard.current_channel = Some(target_channel);
-                add_activity(&mut state, "键盘已归位", detail, "success");
+            if pending_claim.as_ref().is_none_or(|pending| {
+                pending.nonce != claim_nonce || pending.channel != target_channel
+            }) {
+                return;
+            }
+            if accepted {
+                add_activity(&mut state, "切换指令已送达", detail, "claim");
             } else {
+                state.pending_claim = false;
+                *pending_claim = None;
                 add_activity(&mut state, "召回未完成", detail, "error");
             }
         }
+        Payload::ArrivalConfirmed {
+            host_id,
+            claim_nonce: _,
+            channel,
+            sent_at_ms,
+        } => {
+            let mut state = snapshot.write().expect("snapshot poisoned");
+            if host_id == state.config.host_id
+                || channel != state.config.peer_channel
+                || (now_ms() - sent_at_ms).abs() > MESSAGE_MAX_AGE_MS
+            {
+                return;
+            }
+            if let Some(source) = udp_source {
+                *peer_addr = Some(source);
+            }
+            state.keyboard.connected = false;
+            state.keyboard.current_channel = Some(channel);
+            add_activity(
+                &mut state,
+                "对端已确认键盘上线",
+                format!("MX Keys 当前位于通道 {channel}"),
+                "success",
+            );
+        }
     }
+}
+
+fn begin_claim(snapshot: &Arc<RwLock<AppSnapshot>>, reason: &str) -> (PendingClaim, Payload) {
+    let now = Instant::now();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let mut state = snapshot.write().expect("snapshot poisoned");
+    state.pending_claim = true;
+    let channel = state.config.channel;
+    add_activity(
+        &mut state,
+        reason,
+        format!("正在向通道 {channel} 召回键盘"),
+        "claim",
+    );
+    let payload = Payload::Claim {
+        host_id: state.config.host_id.clone(),
+        channel,
+        nonce: nonce.clone(),
+        sent_at_ms: now_ms(),
+    };
+    (
+        PendingClaim {
+            nonce,
+            channel,
+            started_at: now,
+            last_sent_at: now,
+            attempts: 1,
+        },
+        payload,
+    )
+}
+
+fn drive_pending_claim(
+    snapshot: &Arc<RwLock<AppSnapshot>>,
+    pending_claim: &mut Option<PendingClaim>,
+) -> Option<Payload> {
+    let Some(pending) = pending_claim.as_mut() else {
+        return None;
+    };
+    if pending.started_at.elapsed() >= CLAIM_TIMEOUT || pending.attempts >= CLAIM_MAX_ATTEMPTS {
+        let mut state = snapshot.write().expect("snapshot poisoned");
+        state.pending_claim = false;
+        add_activity(
+            &mut state,
+            "召回超时",
+            "当前持有键盘的电脑没有完成切换；若其正在休眠，请先唤醒".into(),
+            "error",
+        );
+        *pending_claim = None;
+        return None;
+    }
+    if pending.last_sent_at.elapsed() < CLAIM_RETRY_INTERVAL {
+        return None;
+    }
+
+    pending.attempts += 1;
+    pending.last_sent_at = Instant::now();
+    let state = snapshot.read().expect("snapshot poisoned");
+    Some(Payload::Claim {
+        host_id: state.config.host_id.clone(),
+        channel: pending.channel,
+        nonce: pending.nonce.clone(),
+        sent_at_ms: now_ms(),
+    })
 }
 
 fn claim_is_authorized(state: &AppSnapshot, host_id: &str, channel: u8, sent_at_ms: i64) -> bool {
@@ -713,7 +886,10 @@ fn perform_switch(snapshot: &Arc<RwLock<AppSnapshot>>, channel: u8) -> Result<()
     match logitech::switch_to(channel) {
         Ok(()) => {
             let mut state = snapshot.write().expect("snapshot poisoned");
+            // ChangeHost 成功后键盘会立刻从当前接收器断开，不能等待 HID++ 回复。
+            state.keyboard.connected = false;
             state.keyboard.current_channel = Some(channel);
+            state.keyboard.supports_change_host = false;
             add_activity(
                 &mut state,
                 "已发送切换指令",
@@ -732,7 +908,7 @@ fn perform_switch(snapshot: &Arc<RwLock<AppSnapshot>>, channel: u8) -> Result<()
     }
 }
 
-async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) {
+async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) -> Option<u8> {
     let hid_access = logitech::hid_access_granted();
     if !hid_access {
         let mut state = snapshot.write().expect("snapshot poisoned");
@@ -744,7 +920,7 @@ async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) {
         state.keyboard.supports_change_host = false;
         state.keyboard.last_error =
             Some("请在系统设置 → 隐私与安全性 → 输入监控中允许 KeyClaim".into());
-        return;
+        return None;
     }
     let result = tokio::task::spawn_blocking(logitech::probe).await;
     let mut state = snapshot.write().expect("snapshot poisoned");
@@ -753,11 +929,13 @@ async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) {
     state.local_host.ready = true;
     match result {
         Ok(Ok(found)) => {
+            let channel = found.current_channel;
             state.keyboard.connected = true;
             state.keyboard.receiver_name = Some(found.receiver_name);
             state.keyboard.current_channel = Some(found.current_channel);
             state.keyboard.supports_change_host = found.channel_count > 1;
             state.keyboard.last_error = None;
+            return Some(channel);
         }
         Ok(Err(error)) => {
             state.keyboard.connected = false;
@@ -771,6 +949,7 @@ async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) {
             state.keyboard.last_error = Some(format!("硬件扫描任务失败: {error}"));
         }
     }
+    None
 }
 
 fn should_request_claim(state: &AppSnapshot) -> bool {
@@ -857,6 +1036,49 @@ mod tests {
         state.keyboard.current_channel = Some(3);
         record_peer_keyboard_channel(&mut state, false, None);
         assert_eq!(state.keyboard.current_channel, Some(3));
+    }
+
+    #[test]
+    fn pending_claim_retries_with_same_nonce() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        let now = Instant::now();
+        let mut pending = Some(PendingClaim {
+            nonce: "stable-nonce".into(),
+            channel: 3,
+            started_at: now - Duration::from_millis(800),
+            last_sent_at: now - CLAIM_RETRY_INTERVAL,
+            attempts: 1,
+        });
+
+        let payload = drive_pending_claim(&snapshot, &mut pending).unwrap();
+        assert!(matches!(
+            payload,
+            Payload::Claim {
+                nonce,
+                channel: 3,
+                ..
+            } if nonce == "stable-nonce"
+        ));
+        assert_eq!(pending.unwrap().attempts, 2);
+    }
+
+    #[test]
+    fn expired_claim_is_cleared_instead_of_reporting_false_success() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        snapshot.write().unwrap().pending_claim = true;
+        let now = Instant::now();
+        let mut pending = Some(PendingClaim {
+            nonce: "expired".into(),
+            channel: 3,
+            started_at: now - CLAIM_TIMEOUT,
+            last_sent_at: now - CLAIM_RETRY_INTERVAL,
+            attempts: 1,
+        });
+
+        assert!(drive_pending_claim(&snapshot, &mut pending).is_none());
+        assert!(pending.is_none());
+        assert!(!snapshot.read().unwrap().pending_claim);
+        assert_eq!(snapshot.read().unwrap().activities[0].title, "召回超时");
     }
 
     #[tokio::test]
