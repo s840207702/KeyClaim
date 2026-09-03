@@ -44,7 +44,14 @@ enum LocalEvent {
     PointerActivity(PointerActivity),
     InputMonitorStatus(bool),
     RefreshHardware,
+    HardwareProbeCompleted(HardwareProbeOutcome),
     ManualSwitch(u8),
+}
+
+#[derive(Debug)]
+struct HardwareProbeOutcome {
+    hid_access: bool,
+    result: Result<logitech::ProbeResult, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -138,7 +145,11 @@ impl Runtime {
                 let _ = status_events.send(LocalEvent::InputMonitorStatus(ready));
             },
         );
-        tauri::async_runtime::spawn(run_loop(self.snapshot.clone(), receiver));
+        tauri::async_runtime::spawn(run_loop(
+            self.snapshot.clone(),
+            receiver,
+            self.events.clone(),
+        ));
     }
 }
 
@@ -201,6 +212,7 @@ fn write_diagnostic_log(kind: &str, title: &str, detail: &str) {
 async fn run_loop(
     snapshot: Arc<RwLock<AppSnapshot>>,
     mut events: mpsc::UnboundedReceiver<LocalEvent>,
+    event_sender: mpsc::UnboundedSender<LocalEvent>,
 ) {
     let port = snapshot
         .read()
@@ -229,6 +241,7 @@ async fn run_loop(
     peer_discovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut hardware_scan = tokio::time::interval(Duration::from_millis(500));
     hardware_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let hardware_probe_in_progress = Arc::new(AtomicBool::new(false));
     let mut pending_claim: Option<PendingClaim> = None;
     let mut intent_gate = InputIntentGate::new();
     let mut peer_addr: Option<SocketAddr> = None;
@@ -276,38 +289,51 @@ async fn run_loop(
                 }
             }
             _ = hardware_scan.tick() => {
-                let local_channel = refresh_keyboard(&snapshot).await;
-                if let (Some(channel), Some(claim)) = (local_channel, pending_claim.as_ref())
-                    && channel == claim.channel
-                {
-                    let claim_nonce = claim.nonce.clone();
-                    pending_claim = None;
-                    {
-                        let mut state = snapshot.write().expect("snapshot poisoned");
-                        state.pending_claim = false;
-                        add_activity(
-                            &mut state,
-                            "键盘已归位",
-                            format!("目标端已确认 MX Keys 上线 · 通道 {channel}"),
-                            "success",
-                        );
-                    }
-                    let host_id = snapshot.read().expect("snapshot poisoned").config.host_id.clone();
-                    send_payload(
-                        socket.as_ref(),
-                        &tcp_outgoing,
-                        &snapshot,
-                        Payload::ArrivalConfirmed {
-                            host_id,
-                            claim_nonce,
-                            channel,
-                            sent_at_ms: now_ms(),
-                        },
-                        peer_addr,
-                    ).await;
-                }
+                start_hardware_probe(
+                    &event_sender,
+                    &hardware_probe_in_progress,
+                );
             },
             event = events.recv() => match event {
+                Some(LocalEvent::HardwareProbeCompleted(outcome)) => {
+                    hardware_probe_in_progress.store(false, Ordering::Release);
+                    let local_channel = apply_hardware_probe(&snapshot, outcome);
+                    let confirmed_arrival = pending_claim.as_ref().and_then(|claim| {
+                        (local_channel == Some(claim.channel))
+                            .then(|| (claim.channel, claim.nonce.clone()))
+                    });
+                    if let Some((channel, claim_nonce)) = confirmed_arrival {
+                        pending_claim = None;
+                        {
+                            let mut state = snapshot.write().expect("snapshot poisoned");
+                            state.pending_claim = false;
+                            add_activity(
+                                &mut state,
+                                "键盘已归位",
+                                format!("目标端已确认 MX Keys 上线 · 通道 {channel}"),
+                                "success",
+                            );
+                        }
+                        let host_id = snapshot
+                            .read()
+                            .expect("snapshot poisoned")
+                            .config
+                            .host_id
+                            .clone();
+                        send_payload(
+                            socket.as_ref(),
+                            &tcp_outgoing,
+                            &snapshot,
+                            Payload::ArrivalConfirmed {
+                                host_id,
+                                claim_nonce,
+                                channel,
+                                sent_at_ms: now_ms(),
+                            },
+                            peer_addr,
+                        ).await;
+                    }
+                }
                 Some(LocalEvent::PointerActivity(activity)) => {
                     let (threshold, debounce, ignore_synthetic) = {
                         let state = snapshot.read().expect("snapshot poisoned");
@@ -367,7 +393,10 @@ async fn run_loop(
                     }
                 }
                 Some(LocalEvent::RefreshHardware) => {
-                    let _ = refresh_keyboard(&snapshot).await;
+                    start_hardware_probe(
+                        &event_sender,
+                        &hardware_probe_in_progress,
+                    );
                 }
                 Some(LocalEvent::ManualSwitch(channel)) => {
                     let local_channel = snapshot.read().expect("snapshot poisoned").config.channel;
@@ -935,9 +964,38 @@ fn perform_switch(snapshot: &Arc<RwLock<AppSnapshot>>, channel: u8) -> Result<()
     }
 }
 
-async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) -> Option<u8> {
-    let hid_access = logitech::hid_access_granted();
-    if !hid_access {
+fn start_hardware_probe(
+    event_sender: &mpsc::UnboundedSender<LocalEvent>,
+    in_progress: &Arc<AtomicBool>,
+) {
+    if in_progress.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    let event_sender = event_sender.clone();
+    tauri::async_runtime::spawn(async move {
+        let hid_access = logitech::hid_access_granted();
+        let result = if hid_access {
+            match tokio::task::spawn_blocking(logitech::probe).await {
+                Ok(Ok(found)) => Ok(found),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(format!("硬件扫描任务失败: {error}")),
+            }
+        } else {
+            Err("请在系统设置 → 隐私与安全性 → 输入监控中允许 KeyClaim".into())
+        };
+        let _ = event_sender.send(LocalEvent::HardwareProbeCompleted(HardwareProbeOutcome {
+            hid_access,
+            result,
+        }));
+    });
+}
+
+fn apply_hardware_probe(
+    snapshot: &Arc<RwLock<AppSnapshot>>,
+    outcome: HardwareProbeOutcome,
+) -> Option<u8> {
+    if !outcome.hid_access {
         let mut state = snapshot.write().expect("snapshot poisoned");
         state.diagnostics.hid_access = false;
         state.diagnostics.receiver_probe = false;
@@ -945,17 +1003,16 @@ async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) -> Option<u8> {
         state.keyboard.connected = false;
         state.keyboard.current_channel = None;
         state.keyboard.supports_change_host = false;
-        state.keyboard.last_error =
-            Some("请在系统设置 → 隐私与安全性 → 输入监控中允许 KeyClaim".into());
+        state.keyboard.last_error = outcome.result.err();
         return None;
     }
-    let result = tokio::task::spawn_blocking(logitech::probe).await;
+
     let mut state = snapshot.write().expect("snapshot poisoned");
     state.diagnostics.hid_access = true;
     state.diagnostics.receiver_probe = true;
     state.local_host.ready = true;
-    match result {
-        Ok(Ok(found)) => {
+    match outcome.result {
+        Ok(found) => {
             let channel = found.current_channel;
             state.keyboard.connected = true;
             state.keyboard.receiver_name = Some(found.receiver_name);
@@ -964,16 +1021,11 @@ async fn refresh_keyboard(snapshot: &Arc<RwLock<AppSnapshot>>) -> Option<u8> {
             state.keyboard.last_error = None;
             return Some(channel);
         }
-        Ok(Err(error)) => {
-            state.keyboard.connected = false;
-            state.keyboard.current_channel = None;
-            state.keyboard.supports_change_host = false;
-            state.keyboard.last_error = Some(error.to_string());
-        }
         Err(error) => {
             state.keyboard.connected = false;
             state.keyboard.current_channel = None;
-            state.keyboard.last_error = Some(format!("硬件扫描任务失败: {error}"));
+            state.keyboard.supports_change_host = false;
+            state.keyboard.last_error = Some(error);
         }
     }
     None
