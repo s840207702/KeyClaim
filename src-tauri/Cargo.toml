@@ -1,6 +1,6 @@
 [package]
 name = "keyclaim"
-version = "0.1.6"
+version = "0.1.7"
 description = "Local-first Logitech keyboard ownership coordinator"
 authors = ["非哥"]
 edition = "2024"

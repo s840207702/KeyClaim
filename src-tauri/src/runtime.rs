@@ -17,6 +17,7 @@ use crate::{
 
 const PEER_STALE_MS: i64 = 4_000;
 const MESSAGE_MAX_AGE_MS: i64 = 5_000;
+const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(3);
 
 enum LocalEvent {
     PointerMoved,
@@ -205,6 +206,7 @@ async fn run_loop(
     }
     let mut packet = [0u8; 4_096];
     let mut heartbeat = tokio::time::interval(Duration::from_millis(900));
+    let mut peer_discovery = tokio::time::interval(PEER_DISCOVERY_INTERVAL);
     let mut hardware_scan = tokio::time::interval(Duration::from_secs(2));
     let mut pending_since: Option<Instant> = None;
     let mut peer_addr: Option<SocketAddr> = None;
@@ -219,6 +221,18 @@ async fn run_loop(
                 }
                 if let Some(socket) = &socket {
                     send_payload(socket, &snapshot, heartbeat_payload(&snapshot), peer_addr).await;
+                }
+            }
+            _ = peer_discovery.tick() => {
+                let peer_is_offline = !snapshot
+                    .read()
+                    .expect("snapshot poisoned")
+                    .peer_host
+                    .online;
+                if peer_is_offline {
+                    if let Some(socket) = &socket {
+                        send_discovery_sweep(socket, &snapshot).await;
+                    }
                 }
             }
             _ = hardware_scan.tick() => refresh_keyboard(&snapshot).await,
@@ -332,6 +346,69 @@ fn discovery_targets(port: u16) -> Vec<SocketAddrV4> {
             if_addrs::IfAddr::V6(_) => None,
         });
     targets_from_broadcasts(port, broadcasts)
+}
+
+async fn send_discovery_sweep(socket: &UdpSocket, snapshot: &Arc<RwLock<AppSnapshot>>) {
+    let payload = heartbeat_payload(snapshot);
+    let (code, port) = {
+        let state = snapshot.read().expect("snapshot poisoned");
+        (state.config.pairing_code.clone(), state.config.network_port)
+    };
+    let Ok(bytes) = protocol::encode(payload, &code) else {
+        return;
+    };
+    for (index, target) in discovery_unicast_targets(port).into_iter().enumerate() {
+        let _ = socket.send_to(&bytes, target).await;
+        if index % 64 == 63 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+fn discovery_unicast_targets(port: u16) -> Vec<SocketAddrV4> {
+    let interfaces = if_addrs::get_if_addrs().unwrap_or_default();
+    let local_addresses: BTreeSet<Ipv4Addr> = interfaces
+        .iter()
+        .filter_map(|interface| match &interface.addr {
+            if_addrs::IfAddr::V4(address) => Some(address.ip),
+            if_addrs::IfAddr::V6(_) => None,
+        })
+        .collect();
+    let mut targets = BTreeSet::new();
+    for interface in interfaces.into_iter().filter(|interface| {
+        interface.is_oper_up()
+            && !interface.is_loopback()
+            && !interface.is_link_local()
+            && !interface.is_p2p()
+    }) {
+        let if_addrs::IfAddr::V4(address) = interface.addr else {
+            continue;
+        };
+        targets.extend(subnet_probe_targets(address.ip, address.netmask, port));
+    }
+    targets.retain(|target| !local_addresses.contains(target.ip()));
+    targets.into_iter().collect()
+}
+
+fn subnet_probe_targets(ip: Ipv4Addr, netmask: Ipv4Addr, port: u16) -> Vec<SocketAddrV4> {
+    if !ip.is_private() {
+        return Vec::new();
+    }
+    let prefix_length = u32::from(netmask).count_ones();
+    if prefix_length > 30 {
+        return Vec::new();
+    }
+
+    // 大网段只扫描本机所在的 /24，避免在企业或虚拟网络里产生大量探测包。
+    let effective_prefix = prefix_length.max(24);
+    let effective_mask = u32::MAX << (32 - effective_prefix);
+    let network = u32::from(ip) & effective_mask;
+    let broadcast = network | !effective_mask;
+    ((network + 1)..broadcast)
+        .map(Ipv4Addr::from)
+        .filter(|candidate| *candidate != ip)
+        .map(|candidate| SocketAddrV4::new(candidate, port))
+        .collect()
 }
 
 fn targets_from_broadcasts(
@@ -625,6 +702,47 @@ mod tests {
         assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::BROADCAST, 45_823)));
         assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 255), 45_823,)));
         assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::new(192, 168, 75, 255), 45_823,)));
+    }
+
+    #[test]
+    fn private_subnet_probe_covers_peer_without_self_or_broadcast() {
+        let targets = subnet_probe_targets(
+            Ipv4Addr::new(192, 168, 1, 178),
+            Ipv4Addr::new(255, 255, 255, 0),
+            45_823,
+        );
+
+        assert_eq!(targets.len(), 253);
+        assert!(targets.contains(&SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 84), 45_823,)));
+        assert!(!targets.contains(&SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 178), 45_823,)));
+        assert!(!targets.contains(&SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 255), 45_823,)));
+    }
+
+    #[test]
+    fn large_private_subnet_probe_is_capped_to_local_slash_24() {
+        let targets = subnet_probe_targets(
+            Ipv4Addr::new(172, 30, 64, 1),
+            Ipv4Addr::new(255, 255, 240, 0),
+            45_823,
+        );
+
+        assert_eq!(targets.len(), 253);
+        assert!(targets.iter().all(|target| {
+            let octets = target.ip().octets();
+            octets[0..3] == [172, 30, 64]
+        }));
+    }
+
+    #[test]
+    fn public_interfaces_are_not_swept() {
+        assert!(
+            subnet_probe_targets(
+                Ipv4Addr::new(203, 0, 113, 10),
+                Ipv4Addr::new(255, 255, 255, 0),
+                45_823,
+            )
+            .is_empty()
+        );
     }
 }
 
