@@ -643,13 +643,7 @@ async fn handle_network_payload(
         } => {
             let allowed = {
                 let state = snapshot.read().expect("snapshot poisoned");
-                host_id != state.config.host_id
-                    && state.peer_host.online
-                    && state.peer_host.ready
-                    && state.peer_host.channel == channel
-                    && (now_ms() - sent_at_ms).abs() <= MESSAGE_MAX_AGE_MS
-                    && state.keyboard.connected
-                    && state.keyboard.current_channel == Some(state.config.channel)
+                claim_is_authorized(&state, &host_id, channel, sent_at_ms)
             };
             if !allowed {
                 return;
@@ -704,6 +698,12 @@ async fn handle_network_payload(
             }
         }
     }
+}
+
+fn claim_is_authorized(state: &AppSnapshot, host_id: &str, channel: u8, sent_at_ms: i64) -> bool {
+    host_id != state.config.host_id
+        && channel == state.config.peer_channel
+        && (now_ms() - sent_at_ms).abs() <= MESSAGE_MAX_AGE_MS
 }
 
 fn perform_switch(snapshot: &Arc<RwLock<AppSnapshot>>, channel: u8) -> Result<(), String> {
@@ -931,6 +931,47 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(received, incoming_payload);
+    }
+
+    #[test]
+    fn authenticated_peer_claim_does_not_depend_on_stale_runtime_cache() {
+        let mut state = mac_snapshot();
+        state.peer_host.online = false;
+        state.peer_host.ready = false;
+        state.keyboard.connected = false;
+        state.keyboard.current_channel = None;
+
+        assert!(claim_is_authorized(
+            &state,
+            "windows-host",
+            state.config.peer_channel,
+            now_ms(),
+        ));
+    }
+
+    #[test]
+    fn claim_authorization_rejects_self_wrong_channel_and_expired_message() {
+        let state = mac_snapshot();
+        let current = now_ms();
+
+        assert!(!claim_is_authorized(
+            &state,
+            &state.config.host_id,
+            state.config.peer_channel,
+            current,
+        ));
+        assert!(!claim_is_authorized(
+            &state,
+            "windows-host",
+            state.config.channel,
+            current,
+        ));
+        assert!(!claim_is_authorized(
+            &state,
+            "windows-host",
+            state.config.peer_channel,
+            current - MESSAGE_MAX_AGE_MS - 1,
+        ));
     }
 
     #[tokio::test]
