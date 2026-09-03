@@ -372,9 +372,9 @@ fn spawn_tcp_connection(
     tauri::async_runtime::spawn(async move {
         active_connections.fetch_add(1, Ordering::Relaxed);
         let (mut reader, mut writer) = stream.into_split();
-        loop {
-            tokio::select! {
-                frame = async {
+        let read_loop = async {
+            loop {
+                let frame = async {
                     let length = reader.read_u32().await? as usize;
                     if length == 0 || length > TCP_FRAME_LIMIT {
                         return Err(std::io::Error::new(
@@ -385,15 +385,21 @@ fn spawn_tcp_connection(
                     let mut bytes = vec![0; length];
                     reader.read_exact(&mut bytes).await?;
                     Ok::<Vec<u8>, std::io::Error>(bytes)
-                } => match frame {
+                }
+                .await;
+                match frame {
                     Ok(bytes) => {
                         if incoming.send(bytes).is_err() {
                             break;
                         }
                     }
                     Err(_) => break,
-                },
-                message = outgoing.recv() => match message {
+                }
+            }
+        };
+        let write_loop = async {
+            loop {
+                match outgoing.recv().await {
                     Ok(bytes) => {
                         if writer.write_u32(bytes.len() as u32).await.is_err()
                             || writer.write_all(&bytes).await.is_err()
@@ -403,8 +409,12 @@ fn spawn_tcp_connection(
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
-                },
+                }
             }
+        };
+        tokio::select! {
+            _ = read_loop => {},
+            _ = write_loop => {},
         }
         active_connections.fetch_sub(1, Ordering::Relaxed);
     });
@@ -889,6 +899,38 @@ mod tests {
         let mut received = vec![0; length as usize];
         client.read_exact(&mut received).await.unwrap();
         assert_eq!(received, b"to-peer");
+    }
+
+    #[tokio::test]
+    async fn tcp_outgoing_message_does_not_cancel_partial_incoming_frame() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (outgoing, _) = broadcast::channel(4);
+        let (incoming_sender, mut incoming) = mpsc::unbounded_channel();
+        let active = Arc::new(AtomicUsize::new(0));
+
+        spawn_tcp_connection(server, outgoing.clone(), incoming_sender, active);
+
+        let incoming_payload = b"complete-frame";
+        let length = (incoming_payload.len() as u32).to_be_bytes();
+        client.write_all(&length[..2]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        outgoing.send(b"heartbeat".to_vec()).unwrap();
+        let outgoing_length = client.read_u32().await.unwrap();
+        let mut outgoing_payload = vec![0; outgoing_length as usize];
+        client.read_exact(&mut outgoing_payload).await.unwrap();
+        assert_eq!(outgoing_payload, b"heartbeat");
+
+        client.write_all(&length[2..]).await.unwrap();
+        client.write_all(incoming_payload).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(1), incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, incoming_payload);
     }
 
     #[tokio::test]
