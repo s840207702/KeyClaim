@@ -47,8 +47,8 @@ describe("KeyClaim", () => {
     window.history.replaceState({}, "", "/?platform=windows");
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "设备设置" })).toBeVisible();
     expect(await screen.findByText("后台运行中")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "设备设置" })).toBeVisible();
     expect(screen.getByLabelText("常用设置")).toBeVisible();
     const nameField = screen.getByDisplayValue("Windows PC");
     const saveButton = screen.getByRole("button", { name: "保存更改" });

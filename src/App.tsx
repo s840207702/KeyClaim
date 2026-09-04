@@ -232,7 +232,7 @@ function App() {
   };
 
   if (isWindowsRuntime) {
-    return <WindowsMain snapshot={snapshot} channels={channels} loading={loading} message={message} onQuickChange={updateQuickSetting} onSave={save} />;
+    return <WindowsMain key={loading ? "loading" : "ready"} snapshot={snapshot} channels={channels} loading={loading} message={message} onQuickChange={updateQuickSetting} onSave={save} />;
   }
 
   if (settingsOpen) {
