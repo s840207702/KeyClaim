@@ -250,7 +250,7 @@ fn probe_cached_hidapi(found: &ProbeResult) -> Result<ProbeResult, LogitechError
         found.change_host_index,
         0,
         &[],
-        Duration::from_millis(300),
+        Duration::from_millis(120),
     )?;
     if host.len() < 6 {
         return Err(LogitechError::NotFound);
@@ -288,7 +288,8 @@ fn switch_hidapi(channel: u8) -> Result<SwitchPath, LogitechError> {
         .clone();
     if let Some(found) = cached {
         if write_switch_hidapi(&found, channel).is_ok() {
-            *switch_cache().lock().expect("switch cache poisoned") = None;
+            // Easy-Switch 不会改变接收器路径、配对设备索引或功能索引。
+            // 保留路由，键盘快速返回时可以继续走单次写入的热路径。
             return Ok(SwitchPath::Cached);
         }
         *switch_cache().lock().expect("switch cache poisoned") = None;
@@ -296,6 +297,7 @@ fn switch_hidapi(channel: u8) -> Result<SwitchPath, LogitechError> {
 
     let found = probe_hidapi()?;
     write_switch_hidapi(&found, channel)?;
+    *switch_cache().lock().expect("switch cache poisoned") = Some(found);
     Ok(SwitchPath::Discovered)
 }
 
@@ -371,17 +373,20 @@ pub fn probe() -> Result<ProbeResult, LogitechError> {
         .lock()
         .expect("switch cache poisoned")
         .clone();
-    let result = match cached.as_ref().map(probe_cached_hidapi) {
-        Some(Ok(found)) => Ok(found),
-        Some(Err(_)) | None => probe_hidapi(),
+    let result = match cached.as_ref() {
+        Some(found) => probe_cached_hidapi(found),
+        None => probe_hidapi(),
     };
     match &result {
         Ok(found) => {
             *switch_cache().lock().expect("switch cache poisoned") = Some(found.clone());
         }
-        Err(_) => {
+        // 已知路由短暂读不到键盘，通常只是键盘仍在另一通道。此时保留缓存，
+        // 避免 500ms 后台探测退化为数秒全量扫描并挡住下一次 ChangeHost。
+        Err(_) if cached.is_none() => {
             *switch_cache().lock().expect("switch cache poisoned") = None;
         }
+        Err(_) => {}
     }
     result
 }

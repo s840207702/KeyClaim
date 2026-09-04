@@ -373,15 +373,12 @@ int keyclaim_probe_keyboard(keyclaim_probe_result *output) {
   uint8_t response[64];
   int success = hidpp_call(target.device, target.report_id,
                            target.device_index, target.change_host_index, 0,
-                           NULL, 0, response, 0.4);
+                           NULL, 0, response, used_cache ? 0.1 : 0.4);
   if (!success && used_cache) {
+    // 键盘离开当前通道时，缓存路由仍然有效。快速探测只返回离线，
+    // 不在后台退化为全量扫描，以免下一次切换被阻塞数秒。
     release_target(&target);
-    clear_cached_route();
-    if (!find_keyboard(&target))
-      return 0;
-    success = hidpp_call(target.device, target.report_id,
-                         target.device_index, target.change_host_index, 0,
-                         NULL, 0, response, 0.4);
+    return 0;
   }
   if (success && reply_length >= 6) {
     output->channel_count = response[4];
@@ -391,7 +388,7 @@ int keyclaim_probe_keyboard(keyclaim_probe_result *output) {
     output->feature_index = target.change_host_index;
     output->product_id = target.product_id;
     remember_target(&target);
-  } else {
+  } else if (!used_cache) {
     clear_cached_route();
   }
   release_target(&target);
@@ -419,9 +416,12 @@ int keyclaim_switch_keyboard(int channel) {
                          &selected, 1, NULL, 0);
     used_cache = 0;
   }
+  if (success)
+    remember_target(&target);
   release_target(&target);
-  clear_cached_route();
-  if (!success)
+  if (!success) {
+    clear_cached_route();
     return 0;
+  }
   return used_cache ? 2 : 1;
 }
