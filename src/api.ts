@@ -123,8 +123,22 @@ const browserSnapshot: AppSnapshot = {
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 const store = isTauri() ? new LazyStore("keyclaim-settings.json") : null;
 
+function getBrowserSnapshot() {
+  const snapshot = structuredClone(browserSnapshot);
+  if (new URLSearchParams(window.location.search).get("platform") !== "windows") return snapshot;
+  const previewConfig = snapshot.config.platform === "windows"
+    ? snapshot.config
+    : { ...snapshot.config, hostName: "Windows PC", platform: "windows" as const, channel: 2, peerChannel: 3 };
+  snapshot.config = previewConfig;
+  snapshot.localHost = { name: previewConfig.hostName, platform: "windows", channel: previewConfig.channel, online: true, ready: true, lastSeenMs: Date.now() };
+  snapshot.peerHost = { name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: true, lastSeenMs: Date.now() - 820 };
+  snapshot.keyboard.currentChannel = 2;
+  snapshot.diagnostics.syntheticFilterMode = "Windows Raw Input · 仅物理鼠标";
+  return snapshot;
+}
+
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (!isTauri()) return structuredClone(browserSnapshot) as T;
+  if (!isTauri()) return getBrowserSnapshot() as T;
   return invoke<T>(command, args);
 }
 
@@ -138,7 +152,7 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
 }
 
 export const getSnapshot = () => call<AppSnapshot>("get_snapshot");
-export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.2.4");
+export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.2.5");
 export const refreshHardware = () => call<AppSnapshot>("refresh_hardware");
 export const testRecall = () => call<AppSnapshot>("test_recall");
 export const switchKeyboard = (channel: number) => call<AppSnapshot>("switch_keyboard", { channel });
@@ -155,6 +169,7 @@ export async function saveConfig(config: AppConfig): Promise<AppSnapshot> {
   }
   if (!isTauri()) {
     Object.assign(browserSnapshot.config, config);
+    browserSnapshot.localHost.name = config.hostName;
     browserSnapshot.localHost.channel = config.channel;
     browserSnapshot.peerHost.channel = config.peerChannel;
   }

@@ -5,6 +5,7 @@ import { getChannelHosts, type AppSnapshot } from "./api";
 
 afterEach(() => {
   cleanup();
+  window.history.replaceState({}, "", "/");
   vi.restoreAllMocks();
 });
 
@@ -39,6 +40,25 @@ describe("KeyClaim", () => {
     render(<App />);
     expect(screen.getByText("KeyClaim")).toBeVisible();
     expect(screen.getByText("键来")).toBeVisible();
+  });
+
+  it("Windows 使用完整主界面直接展示设备设置", async () => {
+    window.history.replaceState({}, "", "/?platform=windows");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "设备设置" })).toBeVisible();
+    expect(screen.getByLabelText("常用设置")).toBeVisible();
+    const nameField = screen.getByDisplayValue("Windows PC");
+    const saveButton = screen.getByRole("button", { name: "保存更改" });
+    expect(nameField).toBeVisible();
+    expect(saveButton).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "打开设置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "退出键来" })).not.toBeInTheDocument();
+
+    fireEvent.change(nameField, { target: { value: "Feige QA" } });
+    expect(saveButton).toBeEnabled();
+    fireEvent.click(saveButton);
+    await waitFor(() => expect(saveButton).toBeDisabled());
   });
 
   it("三台主机只渲染三个实际通道并按编号排序", () => {

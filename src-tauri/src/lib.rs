@@ -171,9 +171,14 @@ fn take_tray_press_visibility(app: &tauri::AppHandle) -> Option<bool> {
 
 fn show_main_window(app: &tauri::AppHandle, anchor: Option<Rect>) {
     if let Some(window) = app.get_webview_window("main") {
-        if let Some(anchor) = anchor.or_else(|| stored_tray_anchor(app)) {
-            position_main_window(&window, anchor);
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(anchor) = anchor.or_else(|| stored_tray_anchor(app)) {
+                position_main_window(&window, anchor);
+            }
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = anchor;
         let _ = window.unminimize();
         if let Some(state) = app.try_state::<PopoverState>() {
             if let Ok(mut hidden_at) = state.focus_hidden_at.lock() {
@@ -287,9 +292,18 @@ pub fn run() {
                     {
                         remember_tray_anchor(tray.app_handle(), rect);
                         if button == MouseButton::Left {
-                            match button_state {
-                                MouseButtonState::Down => begin_tray_press(tray.app_handle()),
-                                MouseButtonState::Up => finish_tray_click(tray.app_handle(), rect),
+                            #[cfg(target_os = "macos")]
+                            {
+                                match button_state {
+                                    MouseButtonState::Down => begin_tray_press(tray.app_handle()),
+                                    MouseButtonState::Up => {
+                                        finish_tray_click(tray.app_handle(), rect)
+                                    }
+                                }
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            if button_state == MouseButtonState::Up {
+                                show_main_window(tray.app_handle(), None);
                             }
                         }
                     }
@@ -297,10 +311,8 @@ pub fn run() {
 
             #[cfg(not(target_os = "macos"))]
             {
-                let open_item =
-                    MenuItem::with_id(app, "open", "打开 KeyClaim · 键来", true, None::<&str>)?;
-                let quit_item =
-                    MenuItem::with_id(app, "quit", "退出 KeyClaim · 键来", true, None::<&str>)?;
+                let open_item = MenuItem::with_id(app, "open", "打开主界面", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
                 let tray_menu = Menu::with_items(app, &[&open_item, &quit_item])?;
                 tray_builder =
                     tray_builder.menu(&tray_menu).on_menu_event(|app, event| {
@@ -318,6 +330,11 @@ pub fn run() {
 
             tray_builder.build(app)?;
 
+            #[cfg(target_os = "windows")]
+            if !std::env::args().any(|argument| argument == "--hidden") {
+                show_main_window(app.handle(), None);
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -326,11 +343,14 @@ pub fn run() {
                 hide_main_window(window.app_handle());
             }
             tauri::WindowEvent::Focused(false) => {
-                if !is_initial_focus_transition(window.app_handle())
-                    && !tray_press_in_progress(window.app_handle())
+                #[cfg(target_os = "macos")]
                 {
-                    mark_focus_hidden(window.app_handle());
-                    hide_main_window(window.app_handle());
+                    if !is_initial_focus_transition(window.app_handle())
+                        && !tray_press_in_progress(window.app_handle())
+                    {
+                        mark_focus_hidden(window.app_handle());
+                        hide_main_window(window.app_handle());
+                    }
                 }
             }
             _ => {}
