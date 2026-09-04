@@ -4,6 +4,7 @@
  * by Marco Costa, licensed under the MIT License.
  */
 #include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
 #include <IOKit/hid/IOHIDManager.h>
 #include <IOKit/hidsystem/IOHIDLib.h>
 #include <stdint.h>
@@ -36,7 +37,21 @@ typedef struct {
   uint8_t report_id;
   uint8_t change_host_index;
   int product_id;
+  int location_id;
+  uint64_t registry_id;
 } target_t;
+
+typedef struct {
+  int valid;
+  uint8_t device_index;
+  uint8_t report_id;
+  uint8_t change_host_index;
+  int product_id;
+  int location_id;
+  uint64_t registry_id;
+} cached_route_t;
+
+static cached_route_t cached_route;
 
 static uint8_t reply_buffer[64];
 static CFIndex reply_length;
@@ -59,6 +74,14 @@ static int32_t property_int(IOHIDDeviceRef device, CFStringRef key) {
   int32_t output = 0;
   if (value && CFGetTypeID(value) == CFNumberGetTypeID())
     CFNumberGetValue((CFNumberRef)value, kCFNumberSInt32Type, &output);
+  return output;
+}
+
+static uint64_t registry_id(IOHIDDeviceRef device) {
+  uint64_t output = 0;
+  io_service_t service = IOHIDDeviceGetService(device);
+  if (service)
+    IORegistryEntryGetRegistryEntryID(service, &output);
   return output;
 }
 
@@ -153,6 +176,8 @@ static void release_target(target_t *target) {
 typedef struct {
   IOHIDDeviceRef device;
   int product_id;
+  int location_id;
+  uint64_t registry_id;
   int rank;
   int max_input;
 } candidate_t;
@@ -161,6 +186,92 @@ static int compare_candidates(const void *left, const void *right) {
   const candidate_t *a = (const candidate_t *)left;
   const candidate_t *b = (const candidate_t *)right;
   return a->rank - b->rank;
+}
+
+static void clear_cached_route(void) {
+  memset(&cached_route, 0, sizeof(cached_route));
+}
+
+static void remember_target(const target_t *target) {
+  cached_route = (cached_route_t){
+      .valid = 1,
+      .device_index = target->device_index,
+      .report_id = target->report_id,
+      .change_host_index = target->change_host_index,
+      .product_id = target->product_id,
+      .location_id = target->location_id,
+      .registry_id = target->registry_id,
+  };
+}
+
+static void prepare_open_device(IOHIDDeviceRef device, int max_input) {
+  static uint8_t input_buffer[64];
+  IOHIDDeviceRegisterInputReportCallback(device, input_buffer, max_input,
+                                         input_callback, NULL);
+  IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetCurrent(),
+                                 kCFRunLoopDefaultMode);
+}
+
+static int open_cached_keyboard(target_t *target) {
+  memset(target, 0, sizeof(*target));
+  if (!cached_route.valid)
+    return 0;
+
+  IOHIDManagerRef manager =
+      IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+  if (!manager)
+    return 0;
+  IOHIDManagerSetDeviceMatching(manager, NULL);
+  CFSetRef set = IOHIDManagerCopyDevices(manager);
+  if (!set) {
+    CFRelease(manager);
+    return 0;
+  }
+
+  CFIndex count = CFSetGetCount(set);
+  IOHIDDeviceRef *devices = calloc((size_t)count, sizeof(IOHIDDeviceRef));
+  if (!devices && count > 0) {
+    CFRelease(set);
+    CFRelease(manager);
+    return 0;
+  }
+  CFSetGetValues(set, (const void **)devices);
+  int found = 0;
+  for (CFIndex i = 0; i < count && !found; i++) {
+    IOHIDDeviceRef device = devices[i];
+    if (property_int(device, CFSTR(kIOHIDVendorIDKey)) != LOGITECH_VID ||
+        property_int(device, CFSTR(kIOHIDProductIDKey)) !=
+            cached_route.product_id)
+      continue;
+    int location_id = property_int(device, CFSTR(kIOHIDLocationIDKey));
+    uint64_t candidate_registry_id = registry_id(device);
+    if (cached_route.registry_id != 0 &&
+        candidate_registry_id != cached_route.registry_id)
+      continue;
+    if (cached_route.registry_id == 0 && cached_route.location_id != 0 &&
+        location_id != cached_route.location_id)
+      continue;
+    if (IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone) != kIOReturnSuccess)
+      continue;
+    int max_input = property_int(device, CFSTR(kIOHIDMaxInputReportSizeKey));
+    if (max_input <= 0 || max_input > 64)
+      max_input = 64;
+    prepare_open_device(device, max_input);
+    target->manager = manager;
+    target->device = device;
+    target->device_index = cached_route.device_index;
+    target->report_id = cached_route.report_id;
+    target->change_host_index = cached_route.change_host_index;
+    target->product_id = cached_route.product_id;
+    target->location_id = location_id;
+    target->registry_id = candidate_registry_id;
+    found = 1;
+  }
+  free(devices);
+  CFRelease(set);
+  if (!found)
+    CFRelease(manager);
+  return found;
 }
 
 static int find_keyboard(target_t *target) {
@@ -185,12 +296,16 @@ static int find_keyboard(target_t *target) {
     if (property_int(device, CFSTR(kIOHIDVendorIDKey)) != LOGITECH_VID)
       continue;
     int product_id = property_int(device, CFSTR(kIOHIDProductIDKey));
+    int location_id = property_int(device, CFSTR(kIOHIDLocationIDKey));
+    uint64_t candidate_registry_id = registry_id(device);
     int max_input = property_int(device, CFSTR(kIOHIDMaxInputReportSizeKey));
     if (max_input <= 0 || max_input > 64)
       max_input = 64;
     candidates[candidate_count++] = (candidate_t){
         .device = device,
         .product_id = product_id,
+        .location_id = location_id,
+        .registry_id = candidate_registry_id,
         .rank = product_id == UNIFYING_PID ? 0 : 1,
         .max_input = max_input,
     };
@@ -207,11 +322,7 @@ static int find_keyboard(target_t *target) {
     IOHIDDeviceRef device = candidates[i].device;
     if (IOHIDDeviceOpen(device, kIOHIDOptionsTypeNone) != kIOReturnSuccess)
       continue;
-    static uint8_t input_buffer[64];
-    IOHIDDeviceRegisterInputReportCallback(
-        device, input_buffer, candidates[i].max_input, input_callback, NULL);
-    IOHIDDeviceScheduleWithRunLoop(device, CFRunLoopGetCurrent(),
-                                   kCFRunLoopDefaultMode);
+    prepare_open_device(device, candidates[i].max_input);
     for (size_t d = 0; d < sizeof(device_indices) && !found; d++) {
       for (size_t r = 0; r < sizeof(report_ids) && !found; r++) {
         if (candidates[i].product_id != UNIFYING_PID) {
@@ -235,6 +346,8 @@ static int find_keyboard(target_t *target) {
         target->report_id = report_ids[r];
         target->change_host_index = change_host_index;
         target->product_id = candidates[i].product_id;
+        target->location_id = candidates[i].location_id;
+        target->registry_id = candidates[i].registry_id;
         found = 1;
       }
     }
@@ -254,12 +367,22 @@ int keyclaim_probe_keyboard(keyclaim_probe_result *output) {
   if (!output)
     return 0;
   target_t target;
-  if (!find_keyboard(&target))
+  int used_cache = open_cached_keyboard(&target);
+  if (!used_cache && !find_keyboard(&target))
     return 0;
   uint8_t response[64];
   int success = hidpp_call(target.device, target.report_id,
                            target.device_index, target.change_host_index, 0,
                            NULL, 0, response, 0.4);
+  if (!success && used_cache) {
+    release_target(&target);
+    clear_cached_route();
+    if (!find_keyboard(&target))
+      return 0;
+    success = hidpp_call(target.device, target.report_id,
+                         target.device_index, target.change_host_index, 0,
+                         NULL, 0, response, 0.4);
+  }
   if (success && reply_length >= 6) {
     output->channel_count = response[4];
     output->current_channel = response[5] + 1;
@@ -267,6 +390,9 @@ int keyclaim_probe_keyboard(keyclaim_probe_result *output) {
     output->report_id = target.report_id;
     output->feature_index = target.change_host_index;
     output->product_id = target.product_id;
+    remember_target(&target);
+  } else {
+    clear_cached_route();
   }
   release_target(&target);
   return success;
@@ -276,12 +402,26 @@ int keyclaim_switch_keyboard(int channel) {
   if (channel < 1 || channel > 3)
     return 0;
   target_t target;
-  if (!find_keyboard(&target))
+  int used_cache = open_cached_keyboard(&target);
+  if (!used_cache && !find_keyboard(&target))
     return 0;
   uint8_t selected = (uint8_t)(channel - 1);
   int success = hidpp_call(target.device, target.report_id,
                            target.device_index, target.change_host_index, 1,
                            &selected, 1, NULL, 0);
+  if (!success && used_cache) {
+    release_target(&target);
+    clear_cached_route();
+    if (!find_keyboard(&target))
+      return 0;
+    success = hidpp_call(target.device, target.report_id,
+                         target.device_index, target.change_host_index, 1,
+                         &selected, 1, NULL, 0);
+    used_cache = 0;
+  }
   release_target(&target);
-  return success;
+  clear_cached_route();
+  if (!success)
+    return 0;
+  return used_cache ? 2 : 1;
 }

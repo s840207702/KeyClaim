@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  Check, CircleAlert, Keyboard, Laptop, LoaderCircle, Monitor,
-  MousePointer2, RefreshCw, Settings, ShieldCheck, Wifi, X,
-} from "lucide-react";
+import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { Check, CircleAlert, LoaderCircle, Settings, X } from "lucide-react";
 import "./App.css";
 import {
-  AppConfig, AppSnapshot, getAppVersion, getSnapshot, loadSnapshot, refreshHardware, saveConfig,
-  requestHidAccess, switchKeyboard,
+  AppConfig, AppSnapshot, HostView, getChannelHosts, getSnapshot, loadSnapshot, requestHidAccess, saveConfig,
+  quitApp,
 } from "./api";
+
+const WINDOW_WIDTH = 404;
+const WINDOW_HEIGHT = 202;
+const ATTENTION_HEIGHT = 256;
+const SETTINGS_HEIGHT = 364;
 
 const mockLoading: AppSnapshot = {
   config: { hostId: "loading", hostName: "本机", platform: "macos", channel: 3, peerChannel: 2, pairingCode: "KEYCLAIM", autoRecall: true, launchAtLogin: false, movementThreshold: 3, debounceMs: 60, networkPort: 45823, ignoreSyntheticInput: true },
@@ -23,38 +26,14 @@ function Toggle({ checked, onChange, label, disabled = false }: { checked: boole
   return <button type="button" className={`toggle ${checked ? "is-on" : ""}`} role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)}><span /></button>;
 }
 
-function StatusDot({ online }: { online: boolean }) {
-  return <span className={`status-dot ${online ? "online" : "offline"}`} aria-hidden="true" />;
+function friendlyHostName(host: HostView) {
+  const normalized = host.name.replace(/\.local$/i, "").replace(/-/g, " ");
+  if (/macbook\s*pro/i.test(normalized)) return "MacBook Pro";
+  if (/macbook/i.test(normalized)) return "MacBook";
+  return normalized;
 }
 
-function HostCard({ host, active, local, busy, onSwitch }: {
-  host: AppSnapshot["localHost"];
-  active: boolean;
-  local: boolean;
-  busy: boolean;
-  onSwitch: () => void;
-}) {
-  const Icon = host.platform === "macos" ? Laptop : Monitor;
-  const platformName = host.platform === "macos" ? "macOS" : "Windows";
-
-  return <article className={`host-card ${active ? "is-owner" : ""}`}>
-    <div className="host-icon"><Icon size={23} /></div>
-    <div className="host-copy">
-      <div className="host-title">
-        <h2>{host.name}</h2>
-        {local && <span className="local-badge">本机</span>}
-      </div>
-      <p><StatusDot online={host.online} /> {host.online ? "在线" : "离线"} · {platformName} · 通道 {host.channel}</p>
-    </div>
-    {active ? <span className="owner-label"><Check size={15} /> 正在使用</span> : <button className="switch-button" disabled={!host.online || busy} onClick={onSwitch}>{busy ? <LoaderCircle className="spin" size={16} /> : null}切到这里</button>}
-  </article>;
-}
-
-function SettingRow({ title, detail, children }: { title: string; detail: string; children: React.ReactNode }) {
-  return <div className="setting-row"><div><strong>{title}</strong><span>{detail}</span></div>{children}</div>;
-}
-
-function SettingsDialog({ config, onClose, onSave }: { config: AppConfig; onClose: () => void; onSave: (config: AppConfig) => Promise<void> }) {
+function SettingsDialog({ config, onClose, onSave, onQuit }: { config: AppConfig; onClose: () => void; onSave: (config: AppConfig) => Promise<void>; onQuit: () => void }) {
   const [draft, setDraft] = useState(config);
   const [saving, setSaving] = useState(false);
 
@@ -67,16 +46,26 @@ function SettingsDialog({ config, onClose, onSave }: { config: AppConfig; onClos
     }
   };
 
-  return <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-    <section className="settings-dialog" role="dialog" aria-modal="true" aria-label="KeyClaim 设置" onMouseDown={(event) => event.stopPropagation()}>
-      <header><div><h2>设置</h2><p>两台电脑的配对码必须一致。</p></div><button className="icon-button" onClick={onClose} aria-label="关闭设置"><X size={20} /></button></header>
+  const changeChannel = (channel: number) => {
+    const peerChannel = draft.peerChannel === channel
+      ? ([1, 2, 3].find((candidate) => candidate !== channel) ?? draft.peerChannel)
+      : draft.peerChannel;
+    setDraft({ ...draft, channel, peerChannel });
+  };
+
+  return <div className="settings-view">
+    <section className="settings-dialog" role="dialog" aria-modal="true" aria-label="KeyClaim · 键来设置">
+      <header data-tauri-drag-region>
+        <div><span>KeyClaim · 键来</span><h2>设置</h2></div>
+        <button className="icon-button" onClick={onClose} aria-label="关闭设置"><X size={18} /></button>
+      </header>
       <div className="settings-form">
         <label><span>本机名称</span><input value={draft.hostName} onChange={(event) => setDraft({ ...draft, hostName: event.target.value })} /></label>
-        <label><span>本机通道</span><select value={draft.channel} onChange={(event) => { const channel = Number(event.target.value); setDraft({ ...draft, channel, peerChannel: channel === 3 ? 2 : 3 }); }}><option value={2}>通道 2</option><option value={3}>通道 3</option></select></label>
+        <label><span>本机通道</span><select value={draft.channel} onChange={(event) => changeChannel(Number(event.target.value))}><option value={1}>通道 1</option><option value={2}>通道 2</option><option value={3}>通道 3</option></select></label>
         <label><span>双端配对码</span><input value={draft.pairingCode} onChange={(event) => setDraft({ ...draft, pairingCode: event.target.value })} /></label>
-        <label><span>指针灵敏度</span><select value={draft.movementThreshold} onChange={(event) => setDraft({ ...draft, movementThreshold: Number(event.target.value) })}><option value={2}>2px · 灵敏</option><option value={3}>3px · 推荐</option><option value={6}>6px · 稳健</option></select></label>
+        <label><span>指针灵敏度</span><select value={draft.movementThreshold} onChange={(event) => setDraft({ ...draft, movementThreshold: Number(event.target.value) })}><option value={2}>灵敏</option><option value={3}>推荐</option><option value={6}>稳健</option></select></label>
       </div>
-      <footer><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={submit}>{saving && <LoaderCircle className="spin" size={16} />}保存</button></footer>
+      <footer><button className="quit-button" onClick={onQuit}>退出键来</button><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={saving} onClick={submit}>{saving && <LoaderCircle className="spin" size={15} />}保存</button></footer>
     </section>
   </div>;
 }
@@ -84,15 +73,12 @@ function SettingsDialog({ config, onClose, onSave }: { config: AppConfig; onClos
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(mockLoading);
   const [loading, setLoading] = useState(true);
-  const [busyChannel, setBusyChannel] = useState<number>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [message, setMessage] = useState<string>();
-  const [appVersion, setAppVersion] = useState("0.2.2");
 
   useEffect(() => {
     let mounted = true;
     loadSnapshot().then((next) => { if (mounted) setSnapshot(next); }).catch(() => { if (mounted) setMessage("读取本机状态失败"); }).finally(() => { if (mounted) setLoading(false); });
-    getAppVersion().then((version) => { if (mounted) setAppVersion(version); }).catch(() => undefined);
     const timer = window.setInterval(() => getSnapshot().then((next) => { if (mounted) setSnapshot(next); }).catch(() => undefined), 900);
     return () => { mounted = false; window.clearInterval(timer); };
   }, []);
@@ -106,12 +92,25 @@ function App() {
     return () => window.removeEventListener("keydown", listener);
   }, []);
 
-  const owner = useMemo(() => {
-    const channel = snapshot.keyboard.currentChannel;
-    if (channel === snapshot.localHost.channel) return snapshot.localHost;
-    if (channel === snapshot.peerHost.channel) return snapshot.peerHost;
-    return undefined;
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | undefined;
+    void listen("popover-hidden", () => setSettingsOpen(false)).then((stopListening) => { unlisten = stopListening; }).catch(() => undefined);
+    return () => unlisten?.();
+  }, []);
+
+  const channels = useMemo(() => {
+    return getChannelHosts(snapshot);
   }, [snapshot]);
+
+  const needsHidPermission = !loading && snapshot.config.platform === "macos" && !snapshot.diagnostics.hidAccess;
+  const attentionMessage = message ?? (needsHidPermission ? "需要允许设备控制，键来才能访问键盘接收器。" : undefined);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const height = settingsOpen ? SETTINGS_HEIGHT : attentionMessage ? ATTENTION_HEIGHT : WINDOW_HEIGHT;
+    void import("@tauri-apps/api/window").then(({ getCurrentWindow, LogicalSize }) => getCurrentWindow().setSize(new LogicalSize(WINDOW_WIDTH, height))).catch(() => undefined);
+  }, [attentionMessage, settingsOpen]);
 
   const save = async (config: AppConfig) => {
     try {
@@ -131,79 +130,44 @@ function App() {
     }
   };
 
-  const handleSwitch = async (channel: number) => {
-    setBusyChannel(channel);
-    setMessage(undefined);
-    try {
-      setSnapshot(await switchKeyboard(channel));
-    } catch {
-      setMessage("键盘切换失败，请确认接收器和目标电脑在线");
-    } finally {
-      window.setTimeout(() => setBusyChannel(undefined), 450);
-    }
-  };
-
-  const handleRefresh = async () => {
-    setLoading(true);
-    try {
-      setSnapshot(await refreshHardware());
-      setMessage(undefined);
-    } catch {
-      setMessage("没有检测到键盘接收器");
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handlePermission = async () => {
     setMessage(undefined);
     try {
       setSnapshot(await requestHidAccess());
     } catch {
-      setMessage("没有成功发起设备控制授权，请在系统设置中允许 KeyClaim");
+      setMessage("没有成功发起设备控制授权，请在系统设置中允许 KeyClaim · 键来");
     }
   };
 
-  const needsHidPermission = snapshot.config.platform === "macos" && !snapshot.diagnostics.hidAccess;
-  const servicesReady = snapshot.diagnostics.inputMonitor && snapshot.diagnostics.networkListener && snapshot.diagnostics.hidAccess;
-  const latestActivity = snapshot.activities[0];
+  if (settingsOpen) {
+    return <SettingsDialog config={snapshot.config} onClose={() => setSettingsOpen(false)} onSave={async (config) => { await save(config); setSettingsOpen(false); }} onQuit={() => { void quitApp(); }} />;
+  }
 
-  return <div className="app-shell">
-    <header className="app-header">
-      <div className="brand"><img src="/keyclaim-icon.png" alt="" /><div><strong className="brand-name">KeyClaim <span className="version">v{appVersion}</span></strong><span>键盘自动归属</span></div></div>
-      <div className="header-actions"><span className={`service-badge ${servicesReady ? "ready" : ""}`}><StatusDot online={servicesReady} />{servicesReady ? "服务正常" : "正在连接"}</span><button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="打开设置"><Settings size={20} /></button></div>
+  return <div className={`app-shell ${attentionMessage ? "has-attention" : ""}`}>
+    <header className="app-header" data-tauri-drag-region>
+      <div className="brand" data-tauri-drag-region><strong>KeyClaim</strong><span>键来</span></div>
+      <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="打开设置" title="设置（⌘,）"><Settings size={18} /></button>
     </header>
 
     <main>
-      <section className="ownership-card">
-        <div className="keyboard-icon"><Keyboard size={28} /></div>
-        <div className="ownership-copy"><span>当前键盘归属</span><h1>{owner?.name ?? (snapshot.keyboard.connected ? "正在识别" : "尚未连接")}</h1><p>{snapshot.keyboard.connected ? `MX Keys · ${snapshot.keyboard.receiverName ?? "Logitech 接收器"}` : "唤醒键盘后会自动识别当前通道"}</p></div>
-        <div className="ownership-state"><strong>{snapshot.config.autoRecall ? "自动跟随已开启" : "自动跟随已暂停"}</strong><span>移动正在使用的鼠标或触控板即可切换</span></div>
+      <section className="channel-strip" aria-label="键盘通道" style={{ "--channel-count": channels.length } as CSSProperties}>
+        {channels.map((host) => {
+          const active = snapshot.keyboard.currentChannel === host.channel;
+          return <article className={`channel ${active ? "is-active" : ""}`} key={host.channel} aria-current={active ? "true" : undefined} title={`${host.name} · 通道 ${host.channel}`}>
+            <span>通道 {host.channel}</span>
+            <strong>{friendlyHostName(host)}</strong>
+            {active && <span className="active-mark" aria-label="当前通道">{snapshot.pendingClaim ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />}</span>}
+          </article>;
+        })}
       </section>
 
-      <section className="hosts" aria-label="电脑列表">
-        <HostCard host={snapshot.localHost} local active={owner?.channel === snapshot.localHost.channel} busy={busyChannel === snapshot.localHost.channel} onSwitch={() => handleSwitch(snapshot.localHost.channel)} />
-        <HostCard host={snapshot.peerHost} local={false} active={owner?.channel === snapshot.peerHost.channel} busy={busyChannel === snapshot.peerHost.channel} onSwitch={() => handleSwitch(snapshot.peerHost.channel)} />
+      {attentionMessage && <div className="attention-row" role="status"><CircleAlert size={16} /><span>{attentionMessage}</span>{needsHidPermission && <button onClick={handlePermission}>前往允许</button>}</div>}
+
+      <section className="quick-controls" aria-label="常用设置">
+        <div className="quick-control"><span>自动跟随</span><Toggle checked={snapshot.config.autoRecall} disabled={loading} onChange={(autoRecall) => updateQuickSetting({ autoRecall })} label="自动跟随" /></div>
+        <div className="quick-control"><span>开机自启</span><Toggle checked={snapshot.config.launchAtLogin} disabled={loading} onChange={(launchAtLogin) => updateQuickSetting({ launchAtLogin })} label="开机自启" /></div>
       </section>
-
-      <section className="quick-settings" aria-label="常用设置">
-        <SettingRow title="自动跟随" detail="检测到本机鼠标或触控板后召回键盘"><Toggle checked={snapshot.config.autoRecall} disabled={loading} onChange={(autoRecall) => updateQuickSetting({ autoRecall })} label="自动跟随" /></SettingRow>
-        <SettingRow title="开机自动运行" detail="登录系统后自动在后台启动 KeyClaim"><Toggle checked={snapshot.config.launchAtLogin} disabled={loading} onChange={(launchAtLogin) => updateQuickSetting({ launchAtLogin })} label="开机自动运行" /></SettingRow>
-      </section>
-
-      {needsHidPermission && <div className="permission-banner" role="alert"><CircleAlert size={19} /><div><strong>需要允许设备控制</strong><span>没有“输入监控”权限，KeyClaim 无法访问 Logitech 接收器。</span></div><button onClick={handlePermission}>前往允许</button></div>}
-
-      {message && <div className="error-message" role="status"><CircleAlert size={18} />{message}</div>}
-
-      <footer className="status-footer">
-        <div className="health"><span><MousePointer2 size={17} />指针检测 {snapshot.diagnostics.inputMonitor ? "正常" : "未就绪"}</span><span><Wifi size={17} />另一台电脑 {snapshot.peerHost.online ? "在线" : "离线"}</span><span><ShieldCheck size={17} />设备控制 {snapshot.diagnostics.hidAccess ? "已允许" : "未允许"}</span></div>
-        <button className="refresh-button" onClick={handleRefresh} disabled={loading}>{loading ? <LoaderCircle className="spin" size={17} /> : <RefreshCw size={17} />}重新检测</button>
-      </footer>
-
-      {latestActivity && <p className="latest-activity"><span>最近</span>{latestActivity.title} · {latestActivity.detail}<time>{latestActivity.timestamp}</time></p>}
     </main>
-
-    {settingsOpen && <SettingsDialog config={snapshot.config} onClose={() => setSettingsOpen(false)} onSave={async (config) => { await save(config); setSettingsOpen(false); }} />}
   </div>;
 }
 

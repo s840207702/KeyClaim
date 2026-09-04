@@ -33,6 +33,8 @@ export interface AppSnapshot {
   config: AppConfig;
   localHost: HostView;
   peerHost: HostView;
+  /** 为后续三通道、多主机扩展预留；旧版后端缺省时仍使用 localHost + peerHost。 */
+  hosts?: HostView[];
   keyboard: {
     connected: boolean;
     receiverName?: string;
@@ -56,6 +58,13 @@ export interface AppSnapshot {
   }>;
   lastLocalInputMs?: number;
   pendingClaim: boolean;
+}
+
+export function getChannelHosts(snapshot: AppSnapshot) {
+  const hosts = snapshot.hosts?.length ? snapshot.hosts : [snapshot.localHost, snapshot.peerHost];
+  const uniqueChannels = new Map<number, HostView>();
+  hosts.forEach((host) => uniqueChannels.set(host.channel, host));
+  return [...uniqueChannels.values()].sort((left, right) => left.channel - right.channel);
 }
 
 const browserSnapshot: AppSnapshot = {
@@ -129,11 +138,12 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
 }
 
 export const getSnapshot = () => call<AppSnapshot>("get_snapshot");
-export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.2.2");
+export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.2.3");
 export const refreshHardware = () => call<AppSnapshot>("refresh_hardware");
 export const testRecall = () => call<AppSnapshot>("test_recall");
 export const switchKeyboard = (channel: number) => call<AppSnapshot>("switch_keyboard", { channel });
 export const requestHidAccess = () => call<AppSnapshot>("request_hid_access");
+export const quitApp = () => call<void>("quit_app");
 
 export async function saveConfig(config: AppConfig): Promise<AppSnapshot> {
   if (store) {

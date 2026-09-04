@@ -1,5 +1,6 @@
 #[cfg(not(target_os = "macos"))]
 use hidapi::{DeviceInfo, HidApi, HidDevice};
+use std::sync::{Mutex, OnceLock};
 #[cfg(not(target_os = "macos"))]
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,35 @@ pub struct ProbeResult {
     report_id: u8,
     #[cfg(not(target_os = "macos"))]
     change_host_index: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchPath {
+    Cached,
+    Discovered,
+}
+
+impl SwitchPath {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cached => "热路径",
+            Self::Discovered => "冷路径",
+        }
+    }
+}
+
+static DEVICE_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn device_io_lock() -> &'static Mutex<()> {
+    DEVICE_IO_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(not(target_os = "macos"))]
+static SWITCH_CACHE: OnceLock<Mutex<Option<ProbeResult>>> = OnceLock::new();
+
+#[cfg(not(target_os = "macos"))]
+fn switch_cache() -> &'static Mutex<Option<ProbeResult>> {
+    SWITCH_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -209,13 +239,32 @@ fn probe_hidapi() -> Result<ProbeResult, LogitechError> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn switch_hidapi(channel: u8) -> Result<(), LogitechError> {
-    if !(1..=3).contains(&channel) {
-        return Err(LogitechError::InvalidChannel);
-    }
-    let found = probe_hidapi()?;
+fn probe_cached_hidapi(found: &ProbeResult) -> Result<ProbeResult, LogitechError> {
     let api = HidApi::new()?;
-    let path = std::ffi::CString::new(found.path).map_err(|_| LogitechError::NotFound)?;
+    let path = std::ffi::CString::new(found.path.clone()).map_err(|_| LogitechError::NotFound)?;
+    let device = api.open_path(&path)?;
+    let host = request(
+        &device,
+        found.report_id,
+        found.device_index,
+        found.change_host_index,
+        0,
+        &[],
+        Duration::from_millis(300),
+    )?;
+    if host.len() < 6 {
+        return Err(LogitechError::NotFound);
+    }
+    let mut refreshed = found.clone();
+    refreshed.channel_count = host[4];
+    refreshed.current_channel = host[5].saturating_add(1);
+    Ok(refreshed)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_switch_hidapi(found: &ProbeResult, channel: u8) -> Result<(), LogitechError> {
+    let api = HidApi::new()?;
+    let path = std::ffi::CString::new(found.path.clone()).map_err(|_| LogitechError::NotFound)?;
     let device = api.open_path(&path)?;
     let mut frame = vec![0; frame_len(found.report_id)];
     frame[0] = found.report_id;
@@ -225,6 +274,29 @@ fn switch_hidapi(channel: u8) -> Result<(), LogitechError> {
     frame[4] = channel - 1;
     device.write(&frame)?;
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn switch_hidapi(channel: u8) -> Result<SwitchPath, LogitechError> {
+    if !(1..=3).contains(&channel) {
+        return Err(LogitechError::InvalidChannel);
+    }
+
+    let cached = switch_cache()
+        .lock()
+        .expect("switch cache poisoned")
+        .clone();
+    if let Some(found) = cached {
+        if write_switch_hidapi(&found, channel).is_ok() {
+            *switch_cache().lock().expect("switch cache poisoned") = None;
+            return Ok(SwitchPath::Cached);
+        }
+        *switch_cache().lock().expect("switch cache poisoned") = None;
+    }
+
+    let found = probe_hidapi()?;
+    write_switch_hidapi(&found, channel)?;
+    Ok(SwitchPath::Discovered)
 }
 
 #[cfg(target_os = "macos")]
@@ -271,6 +343,7 @@ pub fn request_hid_access() -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn probe() -> Result<ProbeResult, LogitechError> {
+    let _device_guard = device_io_lock().lock().expect("device io lock poisoned");
     if !hid_access_granted() {
         return Err(LogitechError::PermissionDenied);
     }
@@ -293,27 +366,46 @@ pub fn probe() -> Result<ProbeResult, LogitechError> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn probe() -> Result<ProbeResult, LogitechError> {
-    probe_hidapi()
+    let _device_guard = device_io_lock().lock().expect("device io lock poisoned");
+    let cached = switch_cache()
+        .lock()
+        .expect("switch cache poisoned")
+        .clone();
+    let result = match cached.as_ref().map(probe_cached_hidapi) {
+        Some(Ok(found)) => Ok(found),
+        Some(Err(_)) | None => probe_hidapi(),
+    };
+    match &result {
+        Ok(found) => {
+            *switch_cache().lock().expect("switch cache poisoned") = Some(found.clone());
+        }
+        Err(_) => {
+            *switch_cache().lock().expect("switch cache poisoned") = None;
+        }
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]
-pub fn switch_to(channel: u8) -> Result<(), LogitechError> {
+pub fn switch_to(channel: u8) -> Result<SwitchPath, LogitechError> {
     if !(1..=3).contains(&channel) {
         return Err(LogitechError::InvalidChannel);
     }
     if !hid_access_granted() {
         return Err(LogitechError::PermissionDenied);
     }
-    // SAFETY: C 端只接收整数值，目标通道已在上方校验。
-    if unsafe { keyclaim_switch_keyboard(channel as i32) } == 0 {
-        Err(LogitechError::NotFound)
-    } else {
-        Ok(())
+    let _device_guard = device_io_lock().lock().expect("device io lock poisoned");
+    // SAFETY: C 端只接收整数值，目标通道已在上方校验；2 表示命中缓存。
+    match unsafe { keyclaim_switch_keyboard(channel as i32) } {
+        2 => Ok(SwitchPath::Cached),
+        1 => Ok(SwitchPath::Discovered),
+        _ => Err(LogitechError::NotFound),
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn switch_to(channel: u8) -> Result<(), LogitechError> {
+pub fn switch_to(channel: u8) -> Result<SwitchPath, LogitechError> {
+    let _device_guard = device_io_lock().lock().expect("device io lock poisoned");
     switch_hidapi(channel)
 }
 

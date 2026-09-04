@@ -46,6 +46,7 @@ enum LocalEvent {
     InputMonitorStatus(bool),
     RefreshHardware,
     HardwareProbeCompleted(HardwareProbeOutcome),
+    HardwareSwitchCompleted(HardwareSwitchOutcome),
     ManualSwitch(u8),
 }
 
@@ -53,6 +54,19 @@ enum LocalEvent {
 struct HardwareProbeOutcome {
     hid_access: bool,
     result: Result<logitech::ProbeResult, String>,
+}
+
+#[derive(Debug)]
+enum HardwareSwitchOrigin {
+    RemoteClaim { nonce: String },
+    Manual,
+}
+
+#[derive(Debug)]
+struct HardwareSwitchOutcome {
+    origin: HardwareSwitchOrigin,
+    channel: u8,
+    result: Result<String, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -256,6 +270,7 @@ async fn run_loop(
     let mut peer_addr: Option<SocketAddr> = None;
     let mut recent_claims = VecDeque::new();
     let mut recent_messages = VecDeque::new();
+    let mut active_remote_switch: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -343,6 +358,46 @@ async fn run_loop(
                         ).await;
                     }
                 }
+                Some(LocalEvent::HardwareSwitchCompleted(outcome)) => {
+                    match outcome.origin {
+                        HardwareSwitchOrigin::RemoteClaim { nonce } => {
+                            if active_remote_switch.as_deref() == Some(nonce.as_str()) {
+                                active_remote_switch = None;
+                            }
+                            let (accepted, detail) = match outcome.result {
+                                Ok(detail) => (true, detail),
+                                Err(detail) => (false, detail),
+                            };
+                            remember_claim_result(
+                                &mut recent_claims,
+                                nonce.clone(),
+                                accepted,
+                                detail.clone(),
+                            );
+                            let host_id = snapshot
+                                .read()
+                                .expect("snapshot poisoned")
+                                .config
+                                .host_id
+                                .clone();
+                            send_payload(
+                                socket.as_ref(),
+                                &tcp_outgoing,
+                                &snapshot,
+                                Payload::SwitchDispatched {
+                                    host_id,
+                                    claim_nonce: nonce,
+                                    target_channel: outcome.channel,
+                                    accepted,
+                                    detail,
+                                    sent_at_ms: now_ms(),
+                                },
+                                peer_addr,
+                            ).await;
+                        }
+                        HardwareSwitchOrigin::Manual => {}
+                    }
+                }
                 Some(LocalEvent::PointerActivity(activity)) => {
                     let (threshold, debounce, ignore_synthetic) = {
                         let state = snapshot.read().expect("snapshot poisoned");
@@ -420,7 +475,12 @@ async fn run_loop(
                             peer_addr,
                         ).await;
                     } else {
-                        let _ = perform_switch(&snapshot, channel);
+                        start_hardware_switch(
+                            &event_sender,
+                            &snapshot,
+                            channel,
+                            HardwareSwitchOrigin::Manual,
+                        );
                     }
                 }
                 None => break,
@@ -447,6 +507,8 @@ async fn run_loop(
                             &mut peer_addr,
                             &mut recent_claims,
                             &mut pending_claim,
+                            &event_sender,
+                            &mut active_remote_switch,
                         ).await;
                     }
                 }
@@ -483,6 +545,8 @@ async fn run_loop(
                             &mut peer_addr,
                             &mut recent_claims,
                             &mut pending_claim,
+                            &event_sender,
+                            &mut active_remote_switch,
                         ).await;
                     }
                 }
@@ -757,6 +821,8 @@ async fn handle_network_payload(
     peer_addr: &mut Option<SocketAddr>,
     recent_claims: &mut VecDeque<RecentClaim>,
     pending_claim: &mut Option<PendingClaim>,
+    event_sender: &mpsc::UnboundedSender<LocalEvent>,
+    active_remote_switch: &mut Option<String>,
 ) {
     match payload {
         Payload::Heartbeat {
@@ -810,25 +876,19 @@ async fn handle_network_payload(
             if let Some(source) = udp_source {
                 *peer_addr = Some(source);
             }
-            let cached = cached_claim_result(recent_claims, &nonce);
-            let (accepted, detail) = cached.unwrap_or_else(|| {
-                let result = perform_switch(snapshot, channel);
-                let accepted = result.is_ok();
-                let detail = result
-                    .err()
-                    .unwrap_or_else(|| "切换指令已发送，等待目标端确认".into());
-                recent_claims.retain(|claim| claim.nonce != nonce);
-                recent_claims.push_back(RecentClaim {
-                    nonce: nonce.clone(),
-                    handled_at: Instant::now(),
-                    accepted,
-                    detail: detail.clone(),
-                });
-                while recent_claims.len() > RECENT_CLAIM_LIMIT {
-                    recent_claims.pop_front();
+            let Some((accepted, detail)) = cached_claim_result(recent_claims, &nonce) else {
+                if active_remote_switch.is_some() {
+                    return;
                 }
-                (accepted, detail)
-            });
+                *active_remote_switch = Some(nonce.clone());
+                start_hardware_switch(
+                    event_sender,
+                    snapshot,
+                    channel,
+                    HardwareSwitchOrigin::RemoteClaim { nonce },
+                );
+                return;
+            };
             let host_id = snapshot
                 .read()
                 .expect("snapshot poisoned")
@@ -926,6 +986,24 @@ fn cached_claim_result(
         .map(|claim| (claim.accepted, claim.detail.clone()))
 }
 
+fn remember_claim_result(
+    recent_claims: &mut VecDeque<RecentClaim>,
+    nonce: String,
+    accepted: bool,
+    detail: String,
+) {
+    recent_claims.retain(|claim| claim.nonce != nonce);
+    recent_claims.push_back(RecentClaim {
+        nonce,
+        handled_at: Instant::now(),
+        accepted,
+        detail,
+    });
+    while recent_claims.len() > RECENT_CLAIM_LIMIT {
+        recent_claims.pop_front();
+    }
+}
+
 fn begin_claim(snapshot: &Arc<RwLock<AppSnapshot>>, reason: &str) -> (PendingClaim, Payload) {
     let now = Instant::now();
     let nonce = uuid::Uuid::new_v4().to_string();
@@ -998,9 +1076,12 @@ fn claim_is_authorized(state: &AppSnapshot, host_id: &str, channel: u8, sent_at_
         && (now_ms() - sent_at_ms).abs() <= MESSAGE_MAX_AGE_MS
 }
 
-fn perform_switch(snapshot: &Arc<RwLock<AppSnapshot>>, channel: u8) -> Result<(), String> {
+fn perform_switch(snapshot: &Arc<RwLock<AppSnapshot>>, channel: u8) -> Result<String, String> {
+    let started_at = Instant::now();
     match logitech::switch_to(channel) {
-        Ok(()) => {
+        Ok(path) => {
+            let elapsed_ms = started_at.elapsed().as_millis();
+            let path_label = path.label();
             let mut state = snapshot.write().expect("snapshot poisoned");
             // ChangeHost 成功后键盘会立刻从当前接收器断开，不能等待 HID++ 回复。
             state.keyboard.connected = false;
@@ -1009,19 +1090,49 @@ fn perform_switch(snapshot: &Arc<RwLock<AppSnapshot>>, channel: u8) -> Result<()
             add_activity(
                 &mut state,
                 "已发送切换指令",
-                format!("MX Keys → 通道 {channel}"),
+                format!("MX Keys → 通道 {channel} · {path_label} {elapsed_ms}ms"),
                 "success",
             );
-            Ok(())
+            Ok(format!(
+                "切换指令已发送 · {path_label} {elapsed_ms}ms，等待目标端确认"
+            ))
         }
         Err(error) => {
+            let elapsed_ms = started_at.elapsed().as_millis();
             let detail = error.to_string();
             let mut state = snapshot.write().expect("snapshot poisoned");
             state.keyboard.last_error = Some(detail.clone());
-            add_activity(&mut state, "切换失败", detail.clone(), "error");
-            Err(detail)
+            add_activity(
+                &mut state,
+                "切换失败",
+                format!("{detail} · {elapsed_ms}ms"),
+                "error",
+            );
+            Err(format!("{detail} · {elapsed_ms}ms"))
         }
     }
+}
+
+fn start_hardware_switch(
+    event_sender: &mpsc::UnboundedSender<LocalEvent>,
+    snapshot: &Arc<RwLock<AppSnapshot>>,
+    channel: u8,
+    origin: HardwareSwitchOrigin,
+) {
+    let event_sender = event_sender.clone();
+    let snapshot = snapshot.clone();
+    tauri::async_runtime::spawn(async move {
+        let result =
+            match tokio::task::spawn_blocking(move || perform_switch(&snapshot, channel)).await {
+                Ok(result) => result,
+                Err(error) => Err(format!("硬件切换任务失败: {error}")),
+            };
+        let _ = event_sender.send(LocalEvent::HardwareSwitchCompleted(HardwareSwitchOutcome {
+            origin,
+            channel,
+            result,
+        }));
+    });
 }
 
 fn start_hardware_probe(
@@ -1291,6 +1402,8 @@ mod tests {
         let (outgoing, _) = broadcast::channel(4);
         let mut peer_addr = None;
         let mut recent_claims = VecDeque::new();
+        let (event_sender, _) = mpsc::unbounded_channel();
+        let mut active_remote_switch = None;
         let activity_count = snapshot.read().unwrap().activities.len();
 
         for sent_at_ms in [now_ms(), now_ms() + 1] {
@@ -1310,6 +1423,8 @@ mod tests {
                 &mut peer_addr,
                 &mut recent_claims,
                 &mut pending,
+                &event_sender,
+                &mut active_remote_switch,
             )
             .await;
         }
