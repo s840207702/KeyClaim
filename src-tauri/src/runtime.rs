@@ -35,6 +35,7 @@ const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(3);
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
 const TCP_FRAME_LIMIT: usize = 4_096;
 const RECENT_CLAIM_LIMIT: usize = 128;
+const RECENT_MESSAGE_LIMIT: usize = 256;
 const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(700);
 const CLAIM_TIMEOUT: Duration = Duration::from_millis(2_800);
 const CLAIM_MAX_ATTEMPTS: u8 = 3;
@@ -61,6 +62,8 @@ struct PendingClaim {
     started_at: Instant,
     last_sent_at: Instant,
     attempts: u8,
+    dispatch_reported: bool,
+    last_failure_detail: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +72,12 @@ struct RecentClaim {
     handled_at: Instant,
     accepted: bool,
     detail: String,
+}
+
+#[derive(Debug)]
+struct RecentMessage {
+    bytes: Vec<u8>,
+    received_at: Instant,
 }
 
 #[derive(Clone)]
@@ -246,6 +255,7 @@ async fn run_loop(
     let mut intent_gate = InputIntentGate::new();
     let mut peer_addr: Option<SocketAddr> = None;
     let mut recent_claims = VecDeque::new();
+    let mut recent_messages = VecDeque::new();
 
     loop {
         tokio::select! {
@@ -269,12 +279,11 @@ async fn run_loop(
                 ).await;
             }
             _ = peer_discovery.tick() => {
-                let (peer_is_offline, platform) = {
+                let platform = {
                     let state = snapshot.read().expect("snapshot poisoned");
-                    (!state.peer_host.online, state.config.platform.clone())
+                    state.config.platform.clone()
                 };
                 if should_start_tcp_discovery(
-                    peer_is_offline,
                     active_tcp_connections.load(Ordering::Relaxed),
                 ) {
                     if matches!(platform, crate::model::Platform::Windows) {
@@ -424,7 +433,11 @@ async fn run_loop(
             } => {
                 if let Some((size, source)) = result {
                     let code = snapshot.read().expect("snapshot poisoned").config.pairing_code.clone();
-                    if let Ok(payload) = protocol::decode(&packet[..size], &code) {
+                    if let Some(payload) = decode_new_payload(
+                        &packet[..size],
+                        &code,
+                        &mut recent_messages,
+                    ) {
                         handle_network_payload(
                             &snapshot,
                             payload,
@@ -456,7 +469,11 @@ async fn run_loop(
             incoming = tcp_incoming.recv() => {
                 if let Some(bytes) = incoming {
                     let code = snapshot.read().expect("snapshot poisoned").config.pairing_code.clone();
-                    if let Ok(payload) = protocol::decode(&bytes, &code) {
+                    if let Some(payload) = decode_new_payload(
+                        &bytes,
+                        &code,
+                        &mut recent_messages,
+                    ) {
                         handle_network_payload(
                             &snapshot,
                             payload,
@@ -552,18 +569,23 @@ fn start_tcp_discovery_sweep(
                     .and_then(Result::ok)
             }));
         }
+        let mut selected_stream = None;
         for attempt in attempts {
             if let Ok(Some(stream)) = attempt.await {
-                spawn_tcp_connection(
-                    stream,
-                    outgoing.clone(),
-                    incoming.clone(),
-                    active_connections.clone(),
-                );
+                retain_first(&mut selected_stream, stream);
             }
+        }
+        if let Some(stream) = selected_stream {
+            spawn_tcp_connection(stream, outgoing, incoming, active_connections);
         }
         scan_in_progress.store(false, Ordering::Release);
     });
+}
+
+fn retain_first<T>(selected: &mut Option<T>, candidate: T) {
+    if selected.is_none() {
+        *selected = Some(candidate);
+    }
 }
 
 fn tcp_discovery_targets(port: u16) -> Vec<SocketAddrV4> {
@@ -702,6 +724,30 @@ fn targets_from_broadcasts(
     targets.into_iter().collect()
 }
 
+fn decode_new_payload(
+    bytes: &[u8],
+    pairing_code: &str,
+    recent_messages: &mut VecDeque<RecentMessage>,
+) -> Option<Payload> {
+    let payload = protocol::decode(bytes, pairing_code).ok()?;
+    while recent_messages.front().is_some_and(|message| {
+        message.received_at.elapsed() > Duration::from_millis(MESSAGE_MAX_AGE_MS as u64)
+    }) {
+        recent_messages.pop_front();
+    }
+    if recent_messages.iter().any(|message| message.bytes == bytes) {
+        return None;
+    }
+    recent_messages.push_back(RecentMessage {
+        bytes: bytes.to_vec(),
+        received_at: Instant::now(),
+    });
+    while recent_messages.len() > RECENT_MESSAGE_LIMIT {
+        recent_messages.pop_front();
+    }
+    Some(payload)
+}
+
 async fn handle_network_payload(
     snapshot: &Arc<RwLock<AppSnapshot>>,
     payload: Payload,
@@ -807,19 +853,31 @@ async fn handle_network_payload(
             detail,
             sent_at_ms,
         } => {
-            let mut state = snapshot.write().expect("snapshot poisoned");
+            let state = snapshot.read().expect("snapshot poisoned");
             if host_id == state.config.host_id || (now_ms() - sent_at_ms).abs() > MESSAGE_MAX_AGE_MS
             {
                 return;
             }
+            drop(state);
             if let Some(source) = udp_source {
                 *peer_addr = Some(source);
             }
-            if pending_claim.as_ref().is_none_or(|pending| {
-                pending.nonce != claim_nonce || pending.channel != target_channel
-            }) {
+            let Some(pending) = pending_claim.as_mut().filter(|pending| {
+                pending.nonce == claim_nonce && pending.channel == target_channel
+            }) else {
                 return;
+            };
+            if accepted {
+                if pending.dispatch_reported {
+                    return;
+                }
+                pending.dispatch_reported = true;
+            } else if pending.last_failure_detail.as_deref() == Some(detail.as_str()) {
+                return;
+            } else {
+                pending.last_failure_detail = Some(detail.clone());
             }
+            let mut state = snapshot.write().expect("snapshot poisoned");
             if accepted {
                 add_activity(&mut state, "切换指令已送达", detail, "claim");
             } else {
@@ -893,6 +951,8 @@ fn begin_claim(snapshot: &Arc<RwLock<AppSnapshot>>, reason: &str) -> (PendingCla
             started_at: now,
             last_sent_at: now,
             attempts: 1,
+            dispatch_reported: false,
+            last_failure_detail: None,
         },
         payload,
     )
@@ -1037,8 +1097,8 @@ fn should_request_claim(state: &AppSnapshot) -> bool {
         && !state.pending_claim
 }
 
-fn should_start_tcp_discovery(peer_is_offline: bool, active_connections: usize) -> bool {
-    peer_is_offline && active_connections == 0
+fn should_start_tcp_discovery(active_connections: usize) -> bool {
+    active_connections == 0
 }
 
 fn record_peer_keyboard_channel(
@@ -1087,10 +1147,9 @@ mod tests {
     }
 
     #[test]
-    fn existing_tcp_connection_prevents_duplicate_discovery_sweep() {
-        assert!(should_start_tcp_discovery(true, 0));
-        assert!(!should_start_tcp_discovery(true, 1));
-        assert!(!should_start_tcp_discovery(false, 0));
+    fn tcp_discovery_depends_on_connection_instead_of_udp_peer_status() {
+        assert!(should_start_tcp_discovery(0));
+        assert!(!should_start_tcp_discovery(1));
     }
 
     #[test]
@@ -1127,6 +1186,8 @@ mod tests {
             started_at: now - Duration::from_millis(800),
             last_sent_at: now - CLAIM_RETRY_INTERVAL,
             attempts: 1,
+            dispatch_reported: false,
+            last_failure_detail: None,
         });
 
         let payload = drive_pending_claim(&snapshot, &mut pending).unwrap();
@@ -1152,6 +1213,8 @@ mod tests {
             started_at: now - CLAIM_TIMEOUT,
             last_sent_at: now - CLAIM_RETRY_INTERVAL,
             attempts: 1,
+            dispatch_reported: false,
+            last_failure_detail: None,
         });
 
         assert!(drive_pending_claim(&snapshot, &mut pending).is_none());
@@ -1183,6 +1246,78 @@ mod tests {
             detail: "第一次失败".into(),
         }]);
         assert!(cached_claim_result(&recent, "retryable").is_none());
+    }
+
+    #[test]
+    fn identical_signed_message_is_only_decoded_once() {
+        let payload = Payload::Claim {
+            host_id: "windows-host".into(),
+            channel: 3,
+            nonce: "same-frame".into(),
+            sent_at_ms: 1,
+        };
+        let bytes = protocol::encode(payload, "KEYCLAIM").unwrap();
+        let mut recent = VecDeque::new();
+
+        assert!(decode_new_payload(&bytes, "KEYCLAIM", &mut recent).is_some());
+        assert!(decode_new_payload(&bytes, "KEYCLAIM", &mut recent).is_none());
+
+        let retry = protocol::encode(
+            Payload::Claim {
+                host_id: "windows-host".into(),
+                channel: 3,
+                nonce: "same-frame".into(),
+                sent_at_ms: 2,
+            },
+            "KEYCLAIM",
+        )
+        .unwrap();
+        assert!(decode_new_payload(&retry, "KEYCLAIM", &mut recent).is_some());
+    }
+
+    #[tokio::test]
+    async fn repeated_dispatch_status_is_only_recorded_once() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        let now = Instant::now();
+        let mut pending = Some(PendingClaim {
+            nonce: "stable-status".into(),
+            channel: 3,
+            started_at: now,
+            last_sent_at: now,
+            attempts: 1,
+            dispatch_reported: false,
+            last_failure_detail: None,
+        });
+        let (outgoing, _) = broadcast::channel(4);
+        let mut peer_addr = None;
+        let mut recent_claims = VecDeque::new();
+        let activity_count = snapshot.read().unwrap().activities.len();
+
+        for sent_at_ms in [now_ms(), now_ms() + 1] {
+            handle_network_payload(
+                &snapshot,
+                Payload::SwitchDispatched {
+                    host_id: "windows-host".into(),
+                    claim_nonce: "stable-status".into(),
+                    target_channel: 3,
+                    accepted: true,
+                    detail: "切换指令已发送，等待目标端确认".into(),
+                    sent_at_ms,
+                },
+                None,
+                &outgoing,
+                None,
+                &mut peer_addr,
+                &mut recent_claims,
+                &mut pending,
+            )
+            .await;
+        }
+
+        assert_eq!(
+            snapshot.read().unwrap().activities.len(),
+            activity_count + 1
+        );
     }
 
     #[tokio::test]
@@ -1247,6 +1382,14 @@ mod tests {
         let mut received = vec![0; length as usize];
         client.read_exact(&mut received).await.unwrap();
         assert_eq!(received, b"to-peer");
+    }
+
+    #[test]
+    fn discovery_keeps_only_the_first_connected_stream() {
+        let mut selected = None;
+        retain_first(&mut selected, "first");
+        retain_first(&mut selected, "second");
+        assert_eq!(selected, Some("first"));
     }
 
     #[tokio::test]
