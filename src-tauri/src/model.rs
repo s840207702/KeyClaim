@@ -50,7 +50,11 @@ impl Default for AppConfig {
             platform,
             channel,
             peer_channel,
-            pairing_code: "KEYCLAIM".into(),
+            pairing_code: format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            ),
             auto_recall: true,
             launch_at_login: false,
             movement_threshold: 3,
@@ -163,5 +167,20 @@ impl AppSnapshot {
             pending_claim: false,
             config,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    #[test]
+    fn new_installations_have_independent_pairing_codes() {
+        let first = AppConfig::default().pairing_code;
+        let second = AppConfig::default().pairing_code;
+        assert!(first.len() >= 32);
+        assert!(first.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        assert_ne!(first, second);
+        assert_ne!(first, "KEYCLAIM");
     }
 }

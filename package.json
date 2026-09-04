@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:desktop": "node scripts/build-release.mjs",
+    "build:windows": "node scripts/build-release.mjs --bundles nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

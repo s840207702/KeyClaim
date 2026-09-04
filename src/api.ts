@@ -77,7 +77,7 @@ const browserSnapshot: AppSnapshot = {
     platform: "macos",
     channel: 3,
     peerChannel: 2,
-    pairingCode: "KEYCLAIM",
+    pairingCode: "demo-pairing-code",
     autoRecall: true,
     launchAtLogin: false,
     movementThreshold: 3,

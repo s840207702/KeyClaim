@@ -13,7 +13,7 @@ const ATTENTION_HEIGHT = 256;
 const SETTINGS_HEIGHT = 364;
 
 const mockLoading: AppSnapshot = {
-  config: { hostId: "loading", hostName: "本机", platform: "macos", channel: 3, peerChannel: 2, pairingCode: "KEYCLAIM", autoRecall: true, launchAtLogin: false, movementThreshold: 3, debounceMs: 60, networkPort: 45823, ignoreSyntheticInput: true },
+  config: { hostId: "loading", hostName: "本机", platform: "macos", channel: 3, peerChannel: 2, pairingCode: "", autoRecall: true, launchAtLogin: false, movementThreshold: 3, debounceMs: 60, networkPort: 45823, ignoreSyntheticInput: true },
   localHost: { name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: false },
   peerHost: { name: "Windows 工作站", platform: "windows", channel: 2, online: false, ready: false },
   keyboard: { connected: false, supportsChangeHost: false },

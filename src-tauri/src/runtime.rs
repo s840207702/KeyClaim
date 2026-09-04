@@ -1276,7 +1276,9 @@ fn record_peer_keyboard_channel(
     keyboard_connected: bool,
     current_channel: Option<u8>,
 ) {
-    if keyboard_connected && current_channel.is_some() {
+    // 本机接收器刚刚实测到键盘时，这个结果比对端尚未刷新的心跳更权威。
+    // 只有本机未连接键盘，才接受对端上报的通道，避免快速切换后被旧心跳反向覆盖。
+    if !state.keyboard.connected && keyboard_connected && current_channel.is_some() {
         state.keyboard.current_channel = current_channel;
     }
 }
@@ -1344,6 +1346,18 @@ mod tests {
         state.keyboard.current_channel = Some(3);
         record_peer_keyboard_channel(&mut state, false, None);
         assert_eq!(state.keyboard.current_channel, Some(3));
+    }
+
+    #[test]
+    fn stale_peer_heartbeat_does_not_override_locally_confirmed_arrival() {
+        let mut state = mac_snapshot();
+        state.keyboard.connected = true;
+        state.keyboard.current_channel = Some(3);
+
+        record_peer_keyboard_channel(&mut state, true, Some(2));
+
+        assert_eq!(state.keyboard.current_channel, Some(3));
+        assert!(!should_request_claim(&state));
     }
 
     #[test]
@@ -1570,7 +1584,8 @@ mod tests {
                 .await
                 .expect("direct heartbeat timed out")
                 .unwrap();
-        let decoded = protocol::decode(&packet[..size], "KEYCLAIM").unwrap();
+        let pairing_code = snapshot.read().unwrap().config.pairing_code.clone();
+        let decoded = protocol::decode(&packet[..size], &pairing_code).unwrap();
         assert!(matches!(decoded, Payload::Heartbeat { channel: 3, .. }));
     }
 
@@ -1721,7 +1736,8 @@ mod tests {
         let length = client.read_u32().await.unwrap();
         let mut received = vec![0; length as usize];
         client.read_exact(&mut received).await.unwrap();
-        let decoded = protocol::decode(&received, "KEYCLAIM").unwrap();
+        let pairing_code = snapshot.read().unwrap().config.pairing_code.clone();
+        let decoded = protocol::decode(&received, &pairing_code).unwrap();
         assert!(matches!(decoded, Payload::Heartbeat { channel: 3, .. }));
     }
 
