@@ -40,12 +40,12 @@ function changeChannel(config: AppConfig, channel: number) {
   return { ...config, channel, peerChannel };
 }
 
-function SettingsFields({ draft, onChange }: { draft: AppConfig; onChange: (config: AppConfig) => void }) {
+function SettingsFields({ draft, onChange, disabled = false }: { draft: AppConfig; onChange: (config: AppConfig) => void; disabled?: boolean }) {
   return <div className="settings-fields">
-    <label><span>本机名称</span><input value={draft.hostName} onChange={(event) => onChange({ ...draft, hostName: event.target.value })} /></label>
-    <label><span>本机通道</span><select value={draft.channel} onChange={(event) => onChange(changeChannel(draft, Number(event.target.value)))}><option value={1}>通道 1</option><option value={2}>通道 2</option><option value={3}>通道 3</option></select></label>
-    <label><span>双端配对码</span><input value={draft.pairingCode} onChange={(event) => onChange({ ...draft, pairingCode: event.target.value })} /></label>
-    <label><span>指针灵敏度</span><select value={draft.movementThreshold} onChange={(event) => onChange({ ...draft, movementThreshold: Number(event.target.value) })}><option value={2}>灵敏</option><option value={3}>推荐</option><option value={6}>稳健</option></select></label>
+    <label><span>本机名称</span><input disabled={disabled} value={draft.hostName} onChange={(event) => onChange({ ...draft, hostName: event.target.value })} /></label>
+    <label><span>本机通道</span><select disabled={disabled} value={draft.channel} onChange={(event) => onChange(changeChannel(draft, Number(event.target.value)))}><option value={1}>通道 1</option><option value={2}>通道 2</option><option value={3}>通道 3</option></select></label>
+    <label><span>双端配对码</span><input disabled={disabled} value={draft.pairingCode} onChange={(event) => onChange({ ...draft, pairingCode: event.target.value })} /></label>
+    <label><span>指针灵敏度</span><select disabled={disabled} value={draft.movementThreshold} onChange={(event) => onChange({ ...draft, movementThreshold: Number(event.target.value) })}><option value={2}>灵敏</option><option value={3}>推荐</option><option value={6}>稳健</option></select></label>
   </div>;
 }
 
@@ -151,12 +151,12 @@ function WindowsMain({ snapshot, channels, loading, message, onQuickChange, onSa
       {message && <div className="windows-message" role="status"><CircleAlert size={15} /><span>{message}</span></div>}
       <section className="windows-settings" aria-labelledby="settings-heading">
         <div className="section-heading"><h2 id="settings-heading">设备设置</h2></div>
-        <SettingsFields draft={draft} onChange={setDraft} />
+        <SettingsFields draft={draft} onChange={setDraft} disabled={loading} />
       </section>
     </div>
     <footer className="windows-footer">
       <span>{hasChanges ? "有未保存的更改" : "设置已保存"}</span>
-      <button className="primary-button" disabled={!hasChanges || saving} onClick={submit}>{saving && <LoaderCircle className="spin" size={15} />}保存更改</button>
+      <button className="primary-button" disabled={loading || !hasChanges || saving} onClick={submit}>{saving && <LoaderCircle className="spin" size={15} />}保存更改</button>
     </footer>
   </div>;
 }

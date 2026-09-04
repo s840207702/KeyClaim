@@ -209,6 +209,8 @@ main { display: flex; flex-direction: column; }
   border-radius: 8px;
   font-size: 13px;
 }
+.settings-fields input:disabled,
+.settings-fields select:disabled { opacity: 0.56; cursor: default; }
 .settings-dialog footer { min-height: 56px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 20px; background: rgb(32 40 51 / 0.025); border-top: 1px solid var(--border); }
 .quit-button { min-height: 32px; margin-right: auto; padding: 0 4px; color: var(--text-tertiary); background: transparent; border: 0; font-size: 12px; font-weight: 560; cursor: pointer; transition: color 140ms ease; }
 .quit-button:hover { color: #c2413b; }
