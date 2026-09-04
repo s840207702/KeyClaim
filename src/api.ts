@@ -138,7 +138,7 @@ export async function loadSnapshot(): Promise<AppSnapshot> {
 }
 
 export const getSnapshot = () => call<AppSnapshot>("get_snapshot");
-export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.2.3");
+export const getAppVersion = () => isTauri() ? getVersion() : Promise.resolve("0.2.4");
 export const refreshHardware = () => call<AppSnapshot>("refresh_hardware");
 export const testRecall = () => call<AppSnapshot>("test_recall");
 export const switchKeyboard = (channel: number) => call<AppSnapshot>("switch_keyboard", { channel });
