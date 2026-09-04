@@ -36,9 +36,9 @@ const TCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
 const TCP_FRAME_LIMIT: usize = 4_096;
 const RECENT_CLAIM_LIMIT: usize = 128;
 const RECENT_MESSAGE_LIMIT: usize = 256;
-const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(700);
-const CLAIM_TIMEOUT: Duration = Duration::from_millis(2_800);
-const CLAIM_MAX_ATTEMPTS: u8 = 3;
+const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const CLAIM_TIMEOUT: Duration = Duration::from_millis(1_500);
+const CLAIM_MAX_ATTEMPTS: u8 = 4;
 const CLAIM_DUPLICATE_WINDOW: Duration = Duration::from_millis(500);
 
 enum LocalEvent {
@@ -78,6 +78,41 @@ struct PendingClaim {
     attempts: u8,
     dispatch_reported: bool,
     last_failure_detail: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveRemoteSwitch {
+    primary_nonce: String,
+    channel: u8,
+    coalesced_nonces: Vec<String>,
+}
+
+impl ActiveRemoteSwitch {
+    fn new(primary_nonce: String, channel: u8) -> Self {
+        Self {
+            primary_nonce,
+            channel,
+            coalesced_nonces: Vec::new(),
+        }
+    }
+
+    fn contains(&self, nonce: &str) -> bool {
+        self.primary_nonce == nonce
+            || self
+                .coalesced_nonces
+                .iter()
+                .any(|candidate| candidate == nonce)
+    }
+
+    fn coalesce(&mut self, nonce: String) {
+        if !self.contains(&nonce) {
+            self.coalesced_nonces.push(nonce);
+        }
+    }
+
+    fn all_nonces(self) -> impl Iterator<Item = String> {
+        std::iter::once(self.primary_nonce).chain(self.coalesced_nonces)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -260,6 +295,8 @@ async fn run_loop(
     let tcp_scan_in_progress = Arc::new(AtomicBool::new(false));
     let mut packet = [0u8; 4_096];
     let mut heartbeat = tokio::time::interval(Duration::from_millis(900));
+    let mut claim_retry = tokio::time::interval(Duration::from_millis(50));
+    claim_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut peer_discovery = tokio::time::interval(PEER_DISCOVERY_INTERVAL);
     peer_discovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut hardware_scan = tokio::time::interval(Duration::from_millis(500));
@@ -270,12 +307,21 @@ async fn run_loop(
     let mut peer_addr: Option<SocketAddr> = None;
     let mut recent_claims = VecDeque::new();
     let mut recent_messages = VecDeque::new();
-    let mut active_remote_switch: Option<String> = None;
+    let mut active_remote_switch: Option<ActiveRemoteSwitch> = None;
 
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 mark_stale_peer(&snapshot);
+                send_payload(
+                    socket.as_ref(),
+                    &tcp_outgoing,
+                    &snapshot,
+                    heartbeat_payload(&snapshot),
+                    peer_addr,
+                ).await;
+            }
+            _ = claim_retry.tick() => {
                 if let Some(payload) = drive_pending_claim(&snapshot, &mut pending_claim) {
                     send_payload(
                         socket.as_ref(),
@@ -285,13 +331,6 @@ async fn run_loop(
                         peer_addr,
                     ).await;
                 }
-                send_payload(
-                    socket.as_ref(),
-                    &tcp_outgoing,
-                    &snapshot,
-                    heartbeat_payload(&snapshot),
-                    peer_addr,
-                ).await;
             }
             _ = peer_discovery.tick() => {
                 let platform = {
@@ -361,39 +400,43 @@ async fn run_loop(
                 Some(LocalEvent::HardwareSwitchCompleted(outcome)) => {
                     match outcome.origin {
                         HardwareSwitchOrigin::RemoteClaim { nonce } => {
-                            if active_remote_switch.as_deref() == Some(nonce.as_str()) {
-                                active_remote_switch = None;
-                            }
                             let (accepted, detail) = match outcome.result {
                                 Ok(detail) => (true, detail),
                                 Err(detail) => (false, detail),
                             };
-                            remember_claim_result(
-                                &mut recent_claims,
-                                nonce.clone(),
-                                accepted,
-                                detail.clone(),
-                            );
+                            let Some(active) = active_remote_switch.take().filter(|active| {
+                                active.primary_nonce == nonce && active.channel == outcome.channel
+                            }) else {
+                                continue;
+                            };
                             let host_id = snapshot
                                 .read()
                                 .expect("snapshot poisoned")
                                 .config
                                 .host_id
                                 .clone();
-                            send_payload(
-                                socket.as_ref(),
-                                &tcp_outgoing,
-                                &snapshot,
-                                Payload::SwitchDispatched {
-                                    host_id,
-                                    claim_nonce: nonce,
-                                    target_channel: outcome.channel,
+                            for claim_nonce in active.all_nonces() {
+                                remember_claim_result(
+                                    &mut recent_claims,
+                                    claim_nonce.clone(),
                                     accepted,
-                                    detail,
-                                    sent_at_ms: now_ms(),
-                                },
-                                peer_addr,
-                            ).await;
+                                    detail.clone(),
+                                );
+                                send_payload(
+                                    socket.as_ref(),
+                                    &tcp_outgoing,
+                                    &snapshot,
+                                    Payload::SwitchDispatched {
+                                        host_id: host_id.clone(),
+                                        claim_nonce,
+                                        target_channel: outcome.channel,
+                                        accepted,
+                                        detail: detail.clone(),
+                                        sent_at_ms: now_ms(),
+                                    },
+                                    peer_addr,
+                                ).await;
+                            }
                         }
                         HardwareSwitchOrigin::Manual => {}
                     }
@@ -822,7 +865,7 @@ async fn handle_network_payload(
     recent_claims: &mut VecDeque<RecentClaim>,
     pending_claim: &mut Option<PendingClaim>,
     event_sender: &mpsc::UnboundedSender<LocalEvent>,
-    active_remote_switch: &mut Option<String>,
+    active_remote_switch: &mut Option<ActiveRemoteSwitch>,
 ) {
     match payload {
         Payload::Heartbeat {
@@ -877,10 +920,12 @@ async fn handle_network_payload(
                 *peer_addr = Some(source);
             }
             let Some((accepted, detail)) = cached_claim_result(recent_claims, &nonce) else {
-                if active_remote_switch.is_some() {
+                cancel_pending_claim(snapshot, pending_claim);
+                if let Some(active) = active_remote_switch.as_mut() {
+                    active.coalesce(nonce);
                     return;
                 }
-                *active_remote_switch = Some(nonce.clone());
+                *active_remote_switch = Some(ActiveRemoteSwitch::new(nonce.clone(), channel));
                 start_hardware_switch(
                     event_sender,
                     snapshot,
@@ -1058,6 +1103,9 @@ fn drive_pending_claim(
     if pending.last_sent_at.elapsed() < CLAIM_RETRY_INTERVAL {
         return None;
     }
+    if pending.dispatch_reported {
+        return None;
+    }
 
     pending.attempts += 1;
     pending.last_sent_at = Instant::now();
@@ -1068,6 +1116,17 @@ fn drive_pending_claim(
         nonce: pending.nonce.clone(),
         sent_at_ms: now_ms(),
     })
+}
+
+fn cancel_pending_claim(
+    snapshot: &Arc<RwLock<AppSnapshot>>,
+    pending_claim: &mut Option<PendingClaim>,
+) -> bool {
+    if pending_claim.take().is_none() {
+        return false;
+    }
+    snapshot.write().expect("snapshot poisoned").pending_claim = false;
+    true
 }
 
 fn claim_is_authorized(state: &AppSnapshot, host_id: &str, channel: u8, sent_at_ms: i64) -> bool {
@@ -1311,6 +1370,56 @@ mod tests {
             } if nonce == "stable-nonce"
         ));
         assert_eq!(pending.unwrap().attempts, 2);
+    }
+
+    #[test]
+    fn acknowledged_claim_waits_for_arrival_without_resending() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        let now = Instant::now();
+        let mut pending = Some(PendingClaim {
+            nonce: "acknowledged".into(),
+            channel: 3,
+            started_at: now,
+            last_sent_at: now - CLAIM_RETRY_INTERVAL,
+            attempts: 1,
+            dispatch_reported: true,
+            last_failure_detail: None,
+        });
+
+        assert!(drive_pending_claim(&snapshot, &mut pending).is_none());
+        assert_eq!(pending.unwrap().attempts, 1);
+    }
+
+    #[test]
+    fn newer_remote_intent_releases_the_previous_local_wait() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        snapshot.write().unwrap().pending_claim = true;
+        let now = Instant::now();
+        let mut pending = Some(PendingClaim {
+            nonce: "local-intent".into(),
+            channel: 3,
+            started_at: now,
+            last_sent_at: now,
+            attempts: 1,
+            dispatch_reported: false,
+            last_failure_detail: None,
+        });
+
+        assert!(cancel_pending_claim(&snapshot, &mut pending));
+        assert!(pending.is_none());
+        assert!(!snapshot.read().unwrap().pending_claim);
+    }
+
+    #[test]
+    fn concurrent_remote_claims_share_one_hardware_switch() {
+        let mut active = ActiveRemoteSwitch::new("first".into(), 2);
+        active.coalesce("second".into());
+        active.coalesce("second".into());
+
+        assert_eq!(
+            active.all_nonces().collect::<Vec<_>>(),
+            vec!["first".to_string(), "second".to_string()]
+        );
     }
 
     #[test]

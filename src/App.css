@@ -60,6 +60,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .brand { display: flex; align-items: baseline; gap: 8px; letter-spacing: -0.2px; }
 .brand strong { font-size: 17px; font-weight: 650; }
 .brand span { color: var(--text-secondary); font-size: 13px; font-weight: 560; }
+.brand small { color: var(--text-tertiary); font-size: 10px; font-weight: 560; letter-spacing: 0; }
 
 .icon-button {
   width: 32px;

@@ -4,7 +4,7 @@ import { Check, CircleAlert, LoaderCircle, Settings, X } from "lucide-react";
 import "./App.css";
 import {
   AppConfig, AppSnapshot, HostView, getChannelHosts, getSnapshot, loadSnapshot, requestHidAccess, saveConfig,
-  quitApp,
+  CURRENT_VERSION, getAppVersion, quitApp,
 } from "./api";
 
 const WINDOW_WIDTH = 404;
@@ -24,6 +24,10 @@ const mockLoading: AppSnapshot = {
 
 function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {
   return <button type="button" className={`toggle ${checked ? "is-on" : ""}`} role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)}><span /></button>;
+}
+
+function Brand({ version }: { version: string }) {
+  return <div className="brand"><strong>KeyClaim</strong><span>键来</span><small>v{version}</small></div>;
 }
 
 function friendlyHostName(host: HostView) {
@@ -69,7 +73,7 @@ function QuickControls({ config, loading, onChange, className = "" }: { config: 
   </section>;
 }
 
-function SettingsDialog({ config, onClose, onSave, onQuit }: { config: AppConfig; onClose: () => void; onSave: (config: AppConfig) => Promise<void>; onQuit: () => void }) {
+function SettingsDialog({ config, version, onClose, onSave, onQuit }: { config: AppConfig; version: string; onClose: () => void; onSave: (config: AppConfig) => Promise<void>; onQuit: () => void }) {
   const [draft, setDraft] = useState(config);
   const [saving, setSaving] = useState(false);
 
@@ -85,7 +89,7 @@ function SettingsDialog({ config, onClose, onSave, onQuit }: { config: AppConfig
   return <div className="settings-view">
     <section className="settings-dialog" role="dialog" aria-modal="true" aria-label="KeyClaim · 键来设置">
       <header data-tauri-drag-region>
-        <div><span>KeyClaim · 键来</span><h2>设置</h2></div>
+        <div><span>KeyClaim · 键来 · v{version}</span><h2>设置</h2></div>
         <button className="icon-button" onClick={onClose} aria-label="关闭设置"><X size={18} /></button>
       </header>
       <SettingsFields draft={draft} onChange={setDraft} />
@@ -94,10 +98,11 @@ function SettingsDialog({ config, onClose, onSave, onQuit }: { config: AppConfig
   </div>;
 }
 
-function WindowsMain({ snapshot, channels, loading, message, onQuickChange, onSave }: {
+function WindowsMain({ snapshot, channels, loading, version, message, onQuickChange, onSave }: {
   snapshot: AppSnapshot;
   channels: HostView[];
   loading: boolean;
+  version: string;
   message?: string;
   onQuickChange: (patch: Partial<AppConfig>) => void;
   onSave: (config: AppConfig) => Promise<void>;
@@ -139,7 +144,7 @@ function WindowsMain({ snapshot, channels, loading, message, onQuickChange, onSa
 
   return <div className="windows-app">
     <header className="windows-header">
-      <div className="brand"><strong>KeyClaim</strong><span>键来</span></div>
+      <Brand version={version} />
       <span className="windows-status"><i />{loading ? "正在启动" : "后台运行中"}</span>
     </header>
     <div className="windows-scroll">
@@ -166,12 +171,17 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [message, setMessage] = useState<string>();
+  const [version, setVersion] = useState(CURRENT_VERSION);
 
   useEffect(() => {
     let mounted = true;
     loadSnapshot().then((next) => { if (mounted) setSnapshot(next); }).catch(() => { if (mounted) setMessage("读取本机状态失败"); }).finally(() => { if (mounted) setLoading(false); });
     const timer = window.setInterval(() => getSnapshot().then((next) => { if (mounted) setSnapshot(next); }).catch(() => undefined), 900);
     return () => { mounted = false; window.clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
+    void getAppVersion().then(setVersion).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -232,16 +242,16 @@ function App() {
   };
 
   if (isWindowsRuntime) {
-    return <WindowsMain key={loading ? "loading" : "ready"} snapshot={snapshot} channels={channels} loading={loading} message={message} onQuickChange={updateQuickSetting} onSave={save} />;
+    return <WindowsMain key={loading ? "loading" : "ready"} snapshot={snapshot} channels={channels} loading={loading} version={version} message={message} onQuickChange={updateQuickSetting} onSave={save} />;
   }
 
   if (settingsOpen) {
-    return <SettingsDialog config={snapshot.config} onClose={() => setSettingsOpen(false)} onSave={async (config) => { await save(config); setSettingsOpen(false); }} onQuit={() => { void quitApp(); }} />;
+    return <SettingsDialog config={snapshot.config} version={version} onClose={() => setSettingsOpen(false)} onSave={async (config) => { await save(config); setSettingsOpen(false); }} onQuit={() => { void quitApp(); }} />;
   }
 
   return <div className={`app-shell ${attentionMessage ? "has-attention" : ""}`}>
     <header className="app-header" data-tauri-drag-region>
-      <div className="brand" data-tauri-drag-region><strong>KeyClaim</strong><span>键来</span></div>
+      <div data-tauri-drag-region><Brand version={version} /></div>
       <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="打开设置" title="设置（⌘,）"><Settings size={18} /></button>
     </header>
 

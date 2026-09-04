@@ -40,6 +40,7 @@ describe("KeyClaim", () => {
     render(<App />);
     expect(screen.getByText("KeyClaim")).toBeVisible();
     expect(screen.getByText("键来")).toBeVisible();
+    expect(screen.getByText("v0.2.6")).toBeVisible();
   });
 
   it("Windows 使用完整主界面直接展示设备设置", async () => {
@@ -48,6 +49,7 @@ describe("KeyClaim", () => {
     render(<App />);
 
     expect(await screen.findByText("后台运行中")).toBeVisible();
+    expect(screen.getByText("v0.2.6")).toBeVisible();
     expect(screen.getByRole("heading", { name: "设备设置" })).toBeVisible();
     expect(screen.getByLabelText("常用设置")).toBeVisible();
     const nameField = screen.getByDisplayValue("Windows PC");
