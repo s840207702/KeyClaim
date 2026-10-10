@@ -15,14 +15,14 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:desktop": "node scripts/build-release.mjs",
+    "build:windows": "node scripts/build-release.mjs --bundles nsis",
     "build:mac": "bash scripts/build-macos-local.sh",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "node scripts/check.mjs",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "build:desktop": "node scripts/build-release.mjs",
-    "build:windows": "node scripts/build-release.mjs --bundles nsis"
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

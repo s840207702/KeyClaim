@@ -15,10 +15,10 @@ KeyClaim 检测本机鼠标或触控板活动，通过局域网通知当前持�
 
 | 平台 | 当前公开安装包 | 安装方法 |
 | --- | --- | --- |
-| Windows 10 / 11 x64 | `KeyClaim_0.2.7_x64-setup.exe` | 退出旧版后运行安装向导；需要 WebView2 Runtime |
-| macOS Apple Silicon | `KeyClaim_0.2.6_aarch64.dmg` | 打开 DMG，将 KeyClaim.app 拖入 Applications |
+| Windows 10 / 11 x64 | [KeyClaim_0.2.7_x64-setup.exe](https://github.com/s840207702/KeyClaim/releases/download/v0.2.7/KeyClaim_0.2.7_x64-setup.exe) | 退出旧版后运行安装向导；需要 WebView2 Runtime |
+| macOS Apple Silicon | [KeyClaim_0.2.7_aarch64.dmg](https://github.com/s840207702/KeyClaim/releases/download/v0.2.7/KeyClaim_0.2.7_aarch64.dmg) | 打开 DMG，将 KeyClaim.app 拖入 Applications |
 
-最新源码为 0.2.7；Mac 本机已从源码更新到 0.2.7，但尚未发布对应 DMG。0.2.7 没有改变通信协议，Windows 0.2.7 可与 Mac 0.2.6 配合使用。macOS 的完整最低系统版本兼容性尚未逐一验证。
+最新源码和两个平台的公开安装包均为 0.2.7。macOS 仅提供 Apple Silicon 包，完整最低系统版本兼容性尚未逐一验证。
 
 Windows 安装包未签名，Mac 包未经过 Apple 公证，系统可能提示或阻止打开。请核对 Release 的 `SHA256SUMS.txt`，并一并保留许可证附件；不要关闭 SmartScreen、Gatekeeper 等系统安全保护。
 
@@ -38,7 +38,7 @@ Windows 安装包未签名，Mac 包未经过 Apple 公证，系统可能提示�
 
 1. 先用键盘的 Easy-Switch 将两台电脑配到不同通道，确认手动切换正常。
 2. 两端安装并启动 KeyClaim，点击右上角齿轮进入设置。
-3. 使用默认 Windows 通道 2、Mac 通道 3；在两端填写相同的自定义随机配对码，建议不少于 32 个随机字符。不要使用公共默认值或账号密码。
+3. 使用默认 Windows 通道 2、Mac 通道 3；新安装会在本机生成随机配对码，在两端填写相同的自定义随机配对码，建议不少于 32 个随机字符。已有配置继续沿用原值，不要使用公共默认值或账号密码。
 4. 按系统提示允许 Mac 输入监控、本地网络访问，并确认系统允许两端局域网通信。
 5. 开启“自动跟随”，在另一台电脑移动鼠标或触控板，检查键盘是否真正归位。
 
