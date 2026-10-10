@@ -1,0 +1,34 @@
+name: 问题与设备兼容性反馈
+description: 提供复现步骤和设备信息，帮助判断问题
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: "请勿上传配对码、配置文件或未经脱敏的日志。安全漏洞请使用仓库 Security 页面的私密报告。"
+  - type: input
+    id: version
+    attributes:
+      label: KeyClaim 版本
+      placeholder: "例如 0.2.6"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 系统与设备
+      description: 两端系统版本、CPU 架构、键盘/鼠标/接收器型号，以及键盘连接方式
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤与结果
+      description: 说明具体操作、预期结果与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已脱敏的日志或诊断摘要
+      description: 删除配对码指纹、IP、主机名、序列号和私人路径；不要上传整个配置
+      render: text

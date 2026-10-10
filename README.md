@@ -1,164 +1,163 @@
 <div align="center">
   <img src="docs/assets/keyclaim-icon.png" width="156" alt="KeyClaim · 键来图标">
   <h1>KeyClaim · 键来</h1>
-  <p>让 MX Keys 自动跟随你正在使用的电脑。</p>
-  <p>移动鼠标或触控板，键盘就在 Windows 与 macOS 之间自动归位。</p>
+  <p>让 MX Keys 自动跟随你正在使用的 Windows 或 Mac。</p>
+  <p><a href="https://github.com/s840207702/KeyClaim/releases/latest">下载安装包</a> · <a href="docs/ARCHITECTURE.md">实现原理</a> · <a href="CONTRIBUTING.md">参与项目</a> · <a href="LICENSE">MIT 许可证</a></p>
 </div>
 
-![KeyClaim 主界面](docs/assets/keyclaim-home.png)
+![KeyClaim 主界面示例](docs/assets/keyclaim-home.png)
 
-## 它解决什么
+KeyClaim 是为双机办公开发的本地桌面工具：两台电脑各自使用自己的鼠标或触控板，共用一把 MX Keys。你在另一台电脑上操作鼠标时，当前持有键盘的电脑通过 Logitech HID++ 将键盘切到目标通道。
 
-当一把 MX Keys 分别通过接收器连接 Windows 和 Mac 时，每次切换电脑都要再按一次 Easy-Switch。KeyClaim（中文名“键来”）在两台电脑上同时运行，判断你正在操作哪一台，然后让当前持有键盘的电脑把键盘切到对应通道。
+它**不是网络鼠标键盘转发软件**，不把鼠标指针、按键内容或剪贴板从一台电脑传到另一台；也不是 Logitech 官方产品，与 Logitech 没有隶属或赞助关系。
 
-当前为非哥的设备组合预设：
+## 适用范围
 
-- Windows 工作站：MX Keys 通道 2，MX Master 3。
-- MacBook Pro：MX Keys 通道 3，MX Master 3S 与内置触控板。
-- macOS 优先寻找 PID `0xC52B` 的 Unifying 接收器，避免误控制 PID `0xC548` 的 Bolt 鼠标。
+项目从一套实际设备组合发展而来，目前仍属于早期版本，不是通用的所有品牌键鼠切换工具。
+
+| 项目 | 已使用的组合与范围 |
+| --- | --- |
+| 键盘 | MX Keys，通过支持 HID++ ChangeHost 的接收器分别连接两台电脑 |
+| Windows | x64；本机鼠标为 MX Master 3 |
+| macOS | Apple Silicon；本机鼠标为 MX Master 3S，也使用内置触控板 |
+| 键盘通道 | 默认 Windows 为 2、Mac 为 3，可在设置中调整 |
+| 网络 | 两端处于可信的同一局域网，保持运行并可处理后台任务 |
+
+鼠标仅用于检测本机输入，不需要具备 MX 系列切换能力。其他鼠标可能适用，但未逐一验证。其他键盘、MX Keys S、Bolt 键盘、纯蓝牙连接、Intel Mac、Linux 或三台电脑同时协作均不在当前实机验收范围内。
+
+macOS 接收器探测优先使用 PID `0xC52B` 的 Unifying 接收器，并检查设备类型，避免把 PID `0xC548` 的 Bolt 鼠标当作键盘。
+
+## 下载安装
+
+从 [GitHub Releases](https://github.com/s840207702/KeyClaim/releases) 下载对应安装包，不需要 Node.js 或 Rust：
+
+| 平台 | 0.2.6 安装包 | 安装方法 |
+| --- | --- | --- |
+| Windows x64 | `KeyClaim_0.2.6_x64-setup.exe` | 退出旧版后运行安装向导 |
+| macOS Apple Silicon | `KeyClaim_0.2.6_aarch64.dmg` | 打开 DMG，将 KeyClaim.app 拖入 Applications |
+
+Windows 面向 Windows 10 / 11，运行需要 Microsoft Edge WebView2 Runtime。macOS 的完整最低系统版本兼容性尚未逐一验证；本次只发布 Apple Silicon 包。
+
+当前 Windows 包未签名，macOS 包未经过 Apple 公证，系统可能提示或阻止打开。请先核对 Release 提供的 `SHA256SUMS.txt`，只使用你信任的来源；不要关闭 SmartScreen、Gatekeeper 或其他系统安全保护。
+
+### 首次配对
+
+1. 先用键盘的 Easy-Switch 将两台电脑分别配对到两个不同通道，确认手动切换正常。
+2. 在两台电脑上安装并启动 KeyClaim。
+3. 打开设置（齿轮按钮、`Ctrl+,` 或 `⌘,`），设置各自的本机通道。默认 Windows 为 2，Mac 为 3；使用其他通道时，两端的本机和对端配置必须互相对应。
+4. 在两端填入**相同的自定义随机配对码**，建议不少于 32 个随机字符，并保存。不要保留源码中的公共默认值，也不要使用账号密码。
+5. 在 macOS 的“系统设置 → 隐私与安全性 → 输入监控”中允许 KeyClaim；按系统提示允许本地网络访问。
+6. 确认两端就绪，开启“自动跟随”，在另一台电脑移动鼠标或触控板，检查键盘是否真正归位。
+
+Windows 关闭主窗口后仍驻留托盘；通过托盘菜单退出才能结束服务。macOS 默认只驻留菜单栏，不占 Dock；点击图标打开面板，通过设置页“退出键来”结束。两端可在界面中开启开机自动运行。
+
+配对码是局域网消息的校验凭据，不是云账号或蓝牙配对码；KeyClaim 不会替你完成键盘与接收器的硬件配对。
 
 ## 工作方式
 
 ```text
-鼠标或触控板产生本地输入
-            ↓
-目标电脑通过局域网发起签名召回
-            ↓
+目标电脑检测到本地鼠标 / 触控板活动
+                    ↓
+通过局域网发送带签名的召回请求
+                    ↓
 当前持有键盘的电脑发送 HID++ ChangeHost
-            ↓
-目标电脑检测到 MX Keys 真正上线后确认成功
+                    ↓
+目标电脑探测到 MX Keys 上线后确认成功
 ```
 
-- 只有实际指针活动才会触发，不会因电脑单纯唤醒而切换。
-- 另一台电脑离线或未就绪时不发送错误指令。
-- 没有 2 秒锁定；90ms 内累计真实位移，默认仅使用 60ms 防抖。
-- macOS 默认只驻留菜单栏，不占 Dock；点击图标后从图标正下方展开，点到外面或再次点击图标即收起。
-- Windows 使用标准主窗口，关闭后继续驻留系统托盘；托盘右键只保留“打开主界面”和“退出”。两端均可选择开机自动运行。
-- 配置、输入状态与运行记录只保存在本机。
+- macOS 使用原生 CGEventTap，Windows 使用 Raw Input；只检测本地指针活动，不记录按键内容。
+- 持久 TCP 是主链路，UDP 广播辅助发现；默认 TCP/UDP 端口均为 `45823`。Windows 会在本地 `/24` 网段探测对端。
+- 消息使用 HMAC-SHA256 校验，并进行时效、重复请求与通道检查；**通信不加密**。
+- 当前持有键盘的电脑必须在线并能处理请求。持有方深度休眠时，仍需使用键盘的 Easy-Switch 手动切换。
+- 应用使用单实例保护；真实到达确认与“已发出切换指令”分开处理。
 
-## 界面
+详细说明见 [技术架构](docs/ARCHITECTURE.md) 和 [设计规格](docs/design/SPEC.md)。
 
-KeyClaim · 键来是一个单任务后台工具。macOS 使用紧凑菜单栏面板；Windows 使用不置顶、可缩放的标准主窗口，并把必要设置收在同一页。核心界面只保留三件事：
+## 排查问题
 
-1. 实际配置了几个通道，就显示几个通道；每个通道直接标注对应设备。
-2. 当前通道使用克制但清晰的选中状态标识。
-3. 自动跟随与开机自启在同一行快速控制。
+先确认手动 Easy-Switch 可用、两端配对码一致、通道互相对应、键盘已唤醒，并检查接收器和系统权限。关闭“自动跟随”即可停止自动召回。
 
-正常状态不展示设备列表、手动切换、在线诊断和运行日志；只有异常时才显示一条必要提示。
-
-macOS 启动后不会弹出独立应用窗口，也不在 Dock 保留图标。高级配置通过右上角设置按钮或 `⌘,` / `Ctrl+,` 打开；需要彻底结束后台服务时，在设置页点击“退出键来”。
-
-## 快速开始
-
-### 环境要求
-
-- Node.js 20 或更高版本
-- Rust stable
-- macOS 12 或更高版本，或 Windows 10 / 11
-- 两台电脑处于同一局域网
-
-### 本地开发
-
-```bash
-cd $HOME/KeyClaim
-npm install
-npm run tauri dev
-```
-
-Codex 或终端只需要把工作目录指向项目根目录，不必为项目额外创建一种特殊终端。
-
-### macOS 构建
-
-```bash
-npm run build:mac
-```
-
-应用生成在：
-
-```text
-src-tauri/target/release/bundle/macos/KeyClaim.app
-```
-
-当前 Mac 已安装到：
-
-```text
-/Applications/KeyClaim.app
-```
-
-### Windows 构建
-
-在 Windows PowerShell 的项目根目录执行：
-
-```powershell
-npm install
-npm test
-npm run tauri build
-```
-
-Windows 端需要与 Mac 使用相同配对码，并把本机通道设为 `2`。
-
-如果 Windows 端没有被 Mac 识别，先让 Windows Codex 在项目根目录执行只读诊断：
+Windows 在源码项目目录可运行只读诊断：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\diagnose-windows.ps1
 ```
 
-脚本只读取 KeyClaim 进程、UDP `45823` 监听、防火墙规则、网卡、配置摘要和 Logitech HID 设备，不会输出配对码，也不会修改系统设置。
+脚本读取进程、UDP 监听、防火墙、网卡、配置摘要和 Logitech HID 设备，不修改系统设置，也不输出配对码明文。不过它会输出配对码指纹、主机名、IP 和设备标识，公开反馈前仍需脱敏；它不检查 TCP 监听。
 
-如果诊断显示 KeyClaim 已启动但另一台电脑仍收不到心跳，可执行一次 Windows 网络修复：
+`scripts/repair-windows-network.ps1` 是可选的**写操作**：请求管理员权限，创建所有网络配置文件下的本地子网 UDP 45823 入站规则，并重启应用。它不是通用修复，不处理 TCP 或出站规则；只有确认需要该规则时才使用。不要为排查问题关闭整个防火墙。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\repair-windows-network.ps1
+## 开发与本地构建
+
+### 前置依赖
+
+- 推荐 Node.js 24.15 或以上的 24.x；也可使用 22.22.2 或以上的 22.x。具体支持范围见 `package.json`，不是所有 Node.js 20 都能运行当前依赖。
+- Rust stable，支持 Rust 2024 edition。
+- Windows：Visual Studio Build Tools 的“使用 C++ 的桌面开发”、Windows SDK 与 WebView2。
+- macOS：Xcode Command Line Tools。
+
+系统依赖安装步骤见 [Tauri 官方文档](https://v2.tauri.app/start/prerequisites/)。克隆后在项目根目录执行：
+
+```bash
+git clone https://github.com/s840207702/KeyClaim.git
+cd KeyClaim
+npm ci
+npm run tauri dev
 ```
 
-脚本会请求一次管理员授权，添加“本地子网、UDP `45823`、入站允许”规则，然后重启 KeyClaim 并验证监听状态。规则不绑定容易随安装升级变化的 exe 路径，不会开放公网来源，也不会读取或输出配对码。
+`npm run dev` 只启动浏览器界面预览，使用示例状态，不会实际控制键盘；实机开发应使用 `npm run tauri dev`。
 
-## 验证
+### Windows 安装包
+
+```powershell
+npm run tauri build -- --bundles nsis
+```
+
+产物位于 `src-tauri/target/release/bundle/nsis/`。本机构建不会自动安装，也不会更新已安装的应用。
+
+### macOS 应用与 DMG
+
+```bash
+npm run build:mac
+npm run tauri build -- --bundles app,dmg
+```
+
+本地签名的 App 位于 `src-tauri/target/release/bundle/macos/KeyClaim.app`；DMG 位于 `src-tauri/target/release/bundle/dmg/`。注意第二条命令会重新构建，DMG 内的 App 不应视为继承第一条命令的签名。正式分发需要按 [Tauri macOS 签名文档](https://v2.tauri.app/distribute/sign/macos/) 签名、公证，再核对 DMG 内的实际应用。`build:mac` 只做稳定身份的本地 ad-hoc 签名，不等于 Developer ID 签名或公证。
+
+### 检查
 
 ```bash
 npm test
 npm run build
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+npm audit --registry=https://registry.npmjs.org
 ```
 
-自动化测试覆盖配置交互、签名消息往返、错误配对码拒绝和非法通道保护。真实 Logitech 接收器探测测试默认忽略，只在键盘已唤醒且需要硬件验收时手动运行。
+现有单元测试覆盖界面、消息协议、通道与召回状态等。真实 Logitech 接收器测试默认忽略，单元测试或构建成功不等于双机切换验收。
 
-## 项目结构
+本仓库保留历史 workflow 文件，但 GitHub Actions 当前停用；发布包通过本机手动构建和上传，不会因提交代码自动运行构建。
 
-```text
-KeyClaim/
-├─ docs/                       架构、设计规范与 README 素材
-├─ public/                     前端品牌资源
-├─ src/                        React 单页界面与 Tauri 调用
-├─ src-tauri/src/runtime.rs    输入监听、双端心跳与召回状态机
-├─ src-tauri/src/protocol.rs   HMAC-SHA256 局域网消息协议
-├─ src-tauri/src/logitech.rs   Windows HIDAPI 后端
-└─ src-tauri/src/native/       macOS IOKit HID++ 后端
-```
+## 当前状态与已知限制
 
-更完整的实现说明见 [技术架构](docs/ARCHITECTURE.md)，界面原则见 [设计规格](docs/design/SPEC.md)。
+当前版本为 `0.2.6`：
 
-## 权限与隐私
+- 发布包已在现有 Windows 和 Apple Silicon Mac 上实际安装、启动，验证唯一进程、TCP/UDP 端口和局域网握手。
+- Windows 有真实键盘归位成功记录，也有召回超时和接收器未找到记录。
+- 新打包的 Mac 应用已验证输入监听与握手，尚未完成新包完整切换和长期稳定性验收。
+- 不承诺所有接收器、所有系统版本、休眠恢复或快速连续切换均正常。
+- Windows 未签名；Mac 未公证；不提供 Intel Mac 安装包。
 
-KeyClaim 不包含账号、云服务、遥测或公网中继。局域网消息使用双方相同的配对码签名，过期消息会被拒绝。macOS 使用只读 `CGEventTap` 监听鼠标与触控板事件，Windows 使用 Raw Input 读取物理鼠标事件；两端都不记录按键内容。macOS 需要一次“输入监控”授权，首次联网时也可能出现系统的本地网络访问提示。
+安装包验证详情见 [0.2.6 Release](https://github.com/s840207702/KeyClaim/releases/tag/v0.2.6)，开源准备检查见 [开源检查记录](docs/OPEN_SOURCE_READINESS.md)。
 
-配对码用于局域网内设备认证，不应复用任何账号密码。应用设置保存在系统应用数据目录，不进入 Git 仓库。
+## 隐私、安全与贡献
 
-## 当前阶段
+配置、配对码和诊断日志保存在本机；没有账号、遥测或公网中继。配对码以明文保存，网络消息不加密，只应在可信局域网使用。公开反馈前删除配对码、配对码指纹和个人环境信息。详情与私密漏洞报告入口见 [安全说明](SECURITY.md)。
 
-当前版本为 `0.2.6`。macOS 菜单栏弹窗启用原生透明窗口底层，四个边角都由同一套圆角完整裁切；macOS 弹窗和 Windows 主界面都会在品牌名旁显示当前版本号。自动跟随链路改为“最后意图优先”：对端的新切换意图会立即结束本机上一轮到达等待，硬件忙碌期间收到的同目标请求会合并响应，网络重试也从心跳周期中拆出。Easy-Switch 路由在成功切换后继续保留，后台离线探测只走约 100ms 的缓存快查，不再退化为数秒全量扫描并阻塞下一次切换；本机接收器已经确认到达后，对端尚未刷新的旧心跳也不会再反向覆盖当前通道。Windows 端保持标准主窗口和简洁托盘菜单，两端继续共用通道、自动跟随和设置组件。
+普通问题请提交 [Issue](https://github.com/s840207702/KeyClaim/issues)。参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-Windows 会在真实局域网接口的当前 `/24` 主动建立持久 TCP 连接，并只保留第一条成功连接；TCP 心跳独立于 UDP 监听，即使系统软件暂时占用 UDP 端口，也不会阻断召回主链路。虚拟网卡和公网地址会被跳过，同一签名消息与同一召回状态会在应用层去重，避免 TCP、UDP 多链路回执造成日志刷屏。两端会提前缓存已确认的 HID++ 设备路由，收到召回请求后优先直接发送 `ChangeHost`，缓存失效时才执行完整扫描；硬件切换和扫描都在独立后台任务中运行，不会阻塞鼠标输入和网络消息。应用启用了单实例保护，避免托盘旧进程与新版本争抢端口。本版采用暖银灰图标背景，与 fei-clipboard 的亮蓝色图标区分，同时保留蓝色三端连接轨迹作为功能识别。
+## 许可证与致谢
 
-0.2 系列的输入判定已经下沉到原生事件源：macOS 使用 `CGEventTap` 并按事件来源过滤合成输入，Windows 使用只接收真实 HID 鼠标数据的 Raw Input。召回采用“指令送达 + 目标端上线确认”两阶段状态机；HID++ `ChangeHost` 按 fire-and-forget 处理，不再把设备断开导致的无回复误判为失败。网络丢包会在短窗口内重发同一 nonce，只有目标电脑真实探测到键盘才显示成功。
+KeyClaim 自有代码按 [MIT License](LICENSE) 开源，允许修改、分发和商用，须保留版权及许可声明，不提供任何担保。
 
-`npm run build:mac` 会使用固定 bundle identifier 与稳定 designated requirement 完成本地签名，降低开发构建导致授权身份漂移的概率；正式分发仍需 Apple Developer ID 签名与公证。
-
-## 开源声明
-
-HID++ 协议实现参考 `mxswitch`（MIT），详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-## 许可证
-
-当前仓库为私有项目，尚未添加开源许可证。未经许可，不代表可以复制、分发或商用。
+HID++ ChangeHost 与部分 macOS HID 报告处理参考 [mxswitch](https://github.com/marcocosta97/mxswitch)；第三方代码和依赖保留各自许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Logitech、MX Keys、MX Master、Unifying 和 Bolt 为其各自权利人的名称或商标。

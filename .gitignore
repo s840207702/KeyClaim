@@ -13,6 +13,20 @@ dist-ssr
 *.local
 .artifacts/
 
+# Local credentials, settings, signing material and recovery copies
+.env
+.env.*
+!.env.example
+keyclaim-settings.json
+keyclaim.log*
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.bak
+backups/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

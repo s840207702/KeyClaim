@@ -3,6 +3,8 @@ name = "keyclaim"
 version = "0.2.6"
 description = "Local-first Logitech keyboard ownership coordinator"
 authors = ["非哥"]
+license = "MIT"
+repository = "https://github.com/s840207702/KeyClaim"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
