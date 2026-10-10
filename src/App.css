@@ -226,56 +226,22 @@ main { display: flex; flex-direction: column; }
 .primary-button:disabled,
 .secondary-button:disabled { opacity: 0.55; cursor: default; }
 
-.windows-header {
-  flex: none;
-  height: 60px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 24px;
-  border-bottom: 1px solid var(--border);
-}
-.windows-header .brand strong { font-size: 18px; }
-.windows-status { display: inline-flex; align-items: center; gap: 7px; color: var(--text-secondary); font-size: 12px; font-weight: 560; }
-.windows-status i { width: 7px; height: 7px; background: #35a25b; border-radius: 50%; box-shadow: 0 0 0 3px rgb(53 162 91 / 0.12); }
-.windows-scroll { flex: 1; min-height: 0; overflow: auto; padding: 18px 24px 16px; scrollbar-gutter: stable; }
-.windows-section,
-.windows-settings { min-width: 0; }
-.section-heading { min-height: 24px; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
-.section-heading h2 { margin: 0; color: var(--text); font-size: 14px; font-weight: 650; letter-spacing: -0.1px; }
-.section-heading span { overflow: hidden; color: var(--text-tertiary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.windows-channel-strip { min-height: 74px; margin: 0; }
-.windows-quick-controls { min-height: 54px; margin-top: 14px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.windows-quick-controls .quick-control:first-child { padding-left: 0; }
-.windows-quick-controls .quick-control:last-child { padding-right: 0; }
-.windows-message { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 9px 10px; color: var(--warning); background: var(--warning-soft); border-radius: 8px; font-size: 12px; }
-.windows-settings { margin-top: 16px; }
-.windows-settings .section-heading { margin-bottom: 2px; }
-.windows-settings .settings-fields label { min-height: 49px; }
-.windows-settings .settings-fields input,
-.windows-settings .settings-fields select { width: min(250px, 58%); background: var(--surface-muted); }
-.windows-footer {
-  flex: none;
-  min-height: 56px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  padding: 0 24px;
-  background: rgb(32 40 51 / 0.025);
-  border-top: 1px solid var(--border);
-}
-.windows-footer > span { color: var(--text-tertiary); font-size: 12px; }
-.windows-footer .primary-button { min-width: 92px; }
-
-@media (max-width: 470px) {
-  .windows-header,
-  .windows-scroll,
-  .windows-footer { padding-left: 18px; padding-right: 18px; }
-  .section-heading > span { display: none; }
-  .windows-settings .settings-fields input,
-  .windows-settings .settings-fields select { width: 56%; }
-}
+.windows-app,
+.windows-settings-view { border: 0; border-radius: 0; }
+.windows-app .app-header { height: 60px; flex: none; padding: 0 22px; }
+.windows-app main { flex: 1; min-height: 0; overflow: auto; }
+.windows-app .channel-strip { min-height: 84px; flex: none; margin: 0 18px; }
+.windows-app .channel strong { font-size: 16px; }
+.windows-app .quick-controls { min-height: 64px; flex: none; margin-top: auto; }
+.windows-app .attention-row { flex: none; margin: 10px 18px; }
+.windows-settings-view .settings-dialog header,
+.windows-settings-view .settings-dialog footer { flex: none; }
+.windows-settings-view .settings-dialog .settings-fields { min-height: 0; overflow: auto; }
+.windows-settings-view .settings-fields input,
+.windows-settings-view .settings-fields select { width: min(250px, 60%); }
+.settings-message { flex: none; margin: 0 20px 10px; }
+.icon-button:disabled,
+.quit-button:disabled { opacity: 0.55; cursor: default; }
 
 .spin { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -31,9 +31,9 @@ macOS 接收器探测优先使用 PID `0xC52B` 的 Unifying 接收器，并检�
 
 从 [GitHub Releases](https://github.com/s840207702/KeyClaim/releases) 下载对应安装包，不需要 Node.js 或 Rust：
 
-| 平台 | 0.2.6 安装包 | 安装方法 |
+| 平台 | 当前安装包 | 安装方法 |
 | --- | --- | --- |
-| Windows x64 | `KeyClaim_0.2.6_x64-setup.exe` | 退出旧版后运行安装向导 |
+| Windows x64 | `KeyClaim_0.2.7_x64-setup.exe` | 退出旧版后运行安装向导 |
 | macOS Apple Silicon | `KeyClaim_0.2.6_aarch64.dmg` | 打开 DMG，将 KeyClaim.app 拖入 Applications |
 
 Windows 面向 Windows 10 / 11，运行需要 Microsoft Edge WebView2 Runtime。macOS 的完整最低系统版本兼容性尚未逐一验证；本次只发布 Apple Silicon 包。
@@ -50,6 +50,8 @@ Windows 面向 Windows 10 / 11，运行需要 Microsoft Edge WebView2 Runtime。
 6. 确认两端就绪，开启“自动跟随”，在另一台电脑移动鼠标或触控板，检查键盘是否真正归位。
 
 Windows 关闭主窗口后仍驻留托盘；通过托盘菜单退出才能结束服务。macOS 默认只驻留菜单栏，不占 Dock；点击图标打开面板，通过设置页“退出键来”结束。两端可在界面中开启开机自动运行。
+
+Windows 0.2.7 主界面与 macOS 一样，只保留通道状态和常用开关；点击右上角齿轮或按 `Ctrl+,`，才显示本机名称、通道、配对码和指针灵敏度。设置页点击“取消”或按 `Esc` 不会保存更改。
 
 配对码是局域网消息的校验凭据，不是云账号或蓝牙配对码；KeyClaim 不会替你完成键盘与接收器的硬件配对。
 
@@ -140,7 +142,9 @@ npm audit --registry=https://registry.npmjs.org
 
 ## 当前状态与已知限制
 
-当前版本为 `0.2.6`：
+Windows 安装包当前为 `0.2.7`，macOS 安装包仍为 `0.2.6`。0.2.7 仅调整 Windows 界面及设置交互，不改变双端通信协议，可与 macOS 0.2.6 配合使用。
+
+此前 0.2.6 的实机验证情况：
 
 - 发布包已在现有 Windows 和 Apple Silicon Mac 上实际安装、启动，验证唯一进程、TCP/UDP 端口和局域网握手。
 - Windows 有真实键盘归位成功记录，也有召回超时和接收器未找到记录。
