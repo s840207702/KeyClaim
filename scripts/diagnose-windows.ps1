@@ -1,4 +1,4 @@
-$ErrorActionPreference = "SilentlyContinue"
+﻿$ErrorActionPreference = "SilentlyContinue"
 
 $port = 45823
 $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'keyclaim.exe'" | ForEach-Object {
