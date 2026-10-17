@@ -40,6 +40,9 @@ const CLAIM_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const CLAIM_TIMEOUT: Duration = Duration::from_millis(1_500);
 const CLAIM_MAX_ATTEMPTS: u8 = 4;
 const CLAIM_DUPLICATE_WINDOW: Duration = Duration::from_millis(500);
+const CLAIM_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(6);
+const CLAIM_ARRIVAL_RETRY_INTERVAL: Duration = Duration::from_millis(750);
+const CLAIM_MAX_ARRIVAL_RETRIES: u8 = 3;
 
 enum LocalEvent {
     PointerActivity(PointerActivity),
@@ -76,7 +79,8 @@ struct PendingClaim {
     started_at: Instant,
     last_sent_at: Instant,
     attempts: u8,
-    dispatch_reported: bool,
+    dispatch_reported_at: Option<Instant>,
+    arrival_retries: u8,
     last_failure_detail: Option<String>,
 }
 
@@ -120,6 +124,7 @@ struct RecentClaim {
     nonce: String,
     handled_at: Instant,
     accepted: bool,
+    completed: bool,
     detail: String,
 }
 
@@ -361,38 +366,16 @@ async fn run_loop(
                 Some(LocalEvent::HardwareProbeCompleted(outcome)) => {
                     hardware_probe_in_progress.store(false, Ordering::Release);
                     let local_channel = apply_hardware_probe(&snapshot, outcome);
-                    let confirmed_arrival = pending_claim.as_ref().and_then(|claim| {
-                        (local_channel == Some(claim.channel))
-                            .then(|| (claim.channel, claim.nonce.clone()))
-                    });
-                    if let Some((channel, claim_nonce)) = confirmed_arrival {
-                        pending_claim = None;
-                        {
-                            let mut state = snapshot.write().expect("snapshot poisoned");
-                            state.pending_claim = false;
-                            add_activity(
-                                &mut state,
-                                "键盘已归位",
-                                format!("目标端已确认 MX Keys 上线 · 通道 {channel}"),
-                                "success",
-                            );
-                        }
-                        let host_id = snapshot
-                            .read()
-                            .expect("snapshot poisoned")
-                            .config
-                            .host_id
-                            .clone();
+                    if let Some(payload) = confirm_local_arrival(
+                        &snapshot,
+                        &mut pending_claim,
+                        local_channel,
+                    ) {
                         send_payload(
                             socket.as_ref(),
                             &tcp_outgoing,
                             &snapshot,
-                            Payload::ArrivalConfirmed {
-                                host_id,
-                                claim_nonce,
-                                channel,
-                                sent_at_ms: now_ms(),
-                            },
+                            payload,
                             peer_addr,
                         ).await;
                     }
@@ -973,10 +956,10 @@ async fn handle_network_payload(
                 return;
             };
             if accepted {
-                if pending.dispatch_reported {
+                if pending.dispatch_reported_at.is_some() {
                     return;
                 }
-                pending.dispatch_reported = true;
+                pending.dispatch_reported_at = Some(Instant::now());
             } else if pending.last_failure_detail.as_deref() == Some(detail.as_str()) {
                 return;
             } else {
@@ -985,6 +968,7 @@ async fn handle_network_payload(
             let mut state = snapshot.write().expect("snapshot poisoned");
             if accepted {
                 add_activity(&mut state, "切换指令已送达", detail, "claim");
+                let _ = event_sender.send(LocalEvent::RefreshHardware);
             } else {
                 // 对端可能只是暂时拿不到接收器（例如刚唤醒或权限服务尚未恢复）。
                 // 保留同一个 nonce，让 drive_pending_claim 在短暂间隔后继续重试；
@@ -994,7 +978,7 @@ async fn handle_network_payload(
         }
         Payload::ArrivalConfirmed {
             host_id,
-            claim_nonce: _,
+            claim_nonce,
             channel,
             sent_at_ms,
         } => {
@@ -1007,6 +991,16 @@ async fn handle_network_payload(
             }
             if let Some(source) = udp_source {
                 *peer_addr = Some(source);
+            }
+            if let Some(claim) = recent_claims
+                .iter_mut()
+                .find(|claim| claim.nonce == claim_nonce)
+            {
+                claim.completed = true;
+            }
+            // 迟到的对端确认不能覆盖本机接收器已确认的新归属。
+            if state.keyboard.connected {
+                return;
             }
             state.keyboard.connected = false;
             state.keyboard.current_channel = Some(channel);
@@ -1027,7 +1021,7 @@ fn cached_claim_result(
     recent_claims
         .iter()
         .find(|claim| claim.nonce == nonce)
-        .filter(|claim| claim.accepted || claim.handled_at.elapsed() < CLAIM_DUPLICATE_WINDOW)
+        .filter(|claim| claim.completed || claim.handled_at.elapsed() < CLAIM_DUPLICATE_WINDOW)
         .map(|claim| (claim.accepted, claim.detail.clone()))
 }
 
@@ -1042,6 +1036,7 @@ fn remember_claim_result(
         nonce,
         handled_at: Instant::now(),
         accepted,
+        completed: false,
         detail,
     });
     while recent_claims.len() > RECENT_CLAIM_LIMIT {
@@ -1074,7 +1069,8 @@ fn begin_claim(snapshot: &Arc<RwLock<AppSnapshot>>, reason: &str) -> (PendingCla
             started_at: now,
             last_sent_at: now,
             attempts: 1,
-            dispatch_reported: false,
+            dispatch_reported_at: None,
+            arrival_retries: 0,
             last_failure_detail: None,
         },
         payload,
@@ -1088,32 +1084,84 @@ fn drive_pending_claim(
     let Some(pending) = pending_claim.as_mut() else {
         return None;
     };
-    if pending.started_at.elapsed() >= CLAIM_TIMEOUT || pending.attempts >= CLAIM_MAX_ATTEMPTS {
+    // 写入接收器不等于键盘已重新连接：送达与真实到达使用不同期限。
+    let timed_out = match pending.dispatch_reported_at {
+        Some(dispatched_at) => dispatched_at.elapsed() >= CLAIM_ARRIVAL_TIMEOUT,
+        None => pending.started_at.elapsed() >= CLAIM_TIMEOUT,
+    };
+    if timed_out {
         let mut state = snapshot.write().expect("snapshot poisoned");
         state.pending_claim = false;
+        let phase = if pending.dispatch_reported_at.is_some() {
+            "切换指令已送达，但目标接收器未确认键盘上线"
+        } else {
+            "切换请求未获得对端送达确认；请检查对端是否在线"
+        };
         add_activity(
             &mut state,
             "召回超时",
-            "当前持有键盘的电脑没有完成切换；若其正在休眠，请先唤醒".into(),
+            format!(
+                "{phase} · 已等待 {}ms",
+                pending.started_at.elapsed().as_millis()
+            ),
             "error",
         );
         *pending_claim = None;
         return None;
     }
-    if pending.last_sent_at.elapsed() < CLAIM_RETRY_INTERVAL {
-        return None;
+    if pending.dispatch_reported_at.is_some() {
+        if pending.last_sent_at.elapsed() < CLAIM_ARRIVAL_RETRY_INTERVAL
+            || pending.arrival_retries >= CLAIM_MAX_ARRIVAL_RETRIES
+        {
+            return None;
+        }
+        // HID 写入成功可能发生在键盘重连期间；有限补发沿用同一个 nonce，
+        // 不延长首次送达后的期限，也不把补发当作到达成功。
+        pending.arrival_retries += 1;
+    } else {
+        if pending.last_sent_at.elapsed() < CLAIM_RETRY_INTERVAL
+            || pending.attempts >= CLAIM_MAX_ATTEMPTS
+        {
+            return None;
+        }
+        pending.attempts += 1;
     }
-    if pending.dispatch_reported {
-        return None;
-    }
-
-    pending.attempts += 1;
     pending.last_sent_at = Instant::now();
     let state = snapshot.read().expect("snapshot poisoned");
     Some(Payload::Claim {
         host_id: state.config.host_id.clone(),
         channel: pending.channel,
         nonce: pending.nonce.clone(),
+        sent_at_ms: now_ms(),
+    })
+}
+
+fn confirm_local_arrival(
+    snapshot: &Arc<RwLock<AppSnapshot>>,
+    pending_claim: &mut Option<PendingClaim>,
+    local_channel: Option<u8>,
+) -> Option<Payload> {
+    let pending = pending_claim.as_ref()?;
+    if local_channel != Some(pending.channel) {
+        return None;
+    }
+    let pending = pending_claim.take().expect("matched pending claim");
+    let mut state = snapshot.write().expect("snapshot poisoned");
+    state.pending_claim = false;
+    add_activity(
+        &mut state,
+        "键盘已归位",
+        format!(
+            "目标端已确认 MX Keys 上线 · 通道 {} · 耗时 {}ms",
+            pending.channel,
+            pending.started_at.elapsed().as_millis()
+        ),
+        "success",
+    );
+    Some(Payload::ArrivalConfirmed {
+        host_id: state.config.host_id.clone(),
+        claim_nonce: pending.nonce,
+        channel: pending.channel,
         sent_at_ms: now_ms(),
     })
 }
@@ -1370,7 +1418,8 @@ mod tests {
             started_at: now - Duration::from_millis(800),
             last_sent_at: now - CLAIM_RETRY_INTERVAL,
             attempts: 1,
-            dispatch_reported: false,
+            dispatch_reported_at: None,
+            arrival_retries: 0,
             last_failure_detail: None,
         });
 
@@ -1396,12 +1445,105 @@ mod tests {
             started_at: now,
             last_sent_at: now - CLAIM_RETRY_INTERVAL,
             attempts: 1,
-            dispatch_reported: true,
+            dispatch_reported_at: Some(now),
+            arrival_retries: 0,
             last_failure_detail: None,
         });
 
         assert!(drive_pending_claim(&snapshot, &mut pending).is_none());
         assert_eq!(pending.unwrap().attempts, 1);
+    }
+
+    #[test]
+    fn acknowledged_claim_does_not_timeout_before_receiver_reconnects() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        snapshot.write().unwrap().pending_claim = true;
+        let now = Instant::now();
+        let mut pending = Some(PendingClaim {
+            nonce: "receiver-reconnecting".into(),
+            channel: 3,
+            started_at: now - Duration::from_millis(2_500),
+            last_sent_at: now,
+            attempts: 1,
+            dispatch_reported_at: Some(now),
+            arrival_retries: 0,
+            last_failure_detail: None,
+        });
+
+        assert!(drive_pending_claim(&snapshot, &mut pending).is_none());
+        assert!(pending.is_some());
+        assert!(snapshot.read().unwrap().pending_claim);
+        assert!(snapshot.read().unwrap().activities.is_empty());
+    }
+
+    #[test]
+    fn last_dispatch_attempt_keeps_waiting_for_reply() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        snapshot.write().unwrap().pending_claim = true;
+        let now = Instant::now();
+        let mut pending = Some(PendingClaim {
+            nonce: "last-attempt".into(),
+            channel: 3,
+            started_at: now - Duration::from_millis(800),
+            last_sent_at: now,
+            attempts: CLAIM_MAX_ATTEMPTS,
+            dispatch_reported_at: None,
+            arrival_retries: 0,
+            last_failure_detail: None,
+        });
+
+        assert!(drive_pending_claim(&snapshot, &mut pending).is_none());
+        assert!(pending.is_some());
+        assert!(snapshot.read().unwrap().pending_claim);
+        assert!(snapshot.read().unwrap().activities.is_empty());
+    }
+
+    #[test]
+    fn arrival_retries_are_bounded_and_do_not_extend_deadline() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        let (claim, _) = begin_claim(&snapshot, "test");
+        let acknowledged_at = Instant::now();
+        let mut pending = Some(PendingClaim {
+            dispatch_reported_at: Some(acknowledged_at),
+            ..claim
+        });
+        for _ in 0..CLAIM_MAX_ARRIVAL_RETRIES {
+            pending.as_mut().unwrap().last_sent_at = Instant::now() - CLAIM_ARRIVAL_RETRY_INTERVAL;
+            let payload = drive_pending_claim(&snapshot, &mut pending).unwrap();
+            assert!(matches!(payload, Payload::Claim { nonce, .. }
+                if nonce == pending.as_ref().unwrap().nonce));
+            assert_eq!(
+                pending.as_ref().unwrap().dispatch_reported_at,
+                Some(acknowledged_at)
+            );
+        }
+        pending.as_mut().unwrap().last_sent_at = Instant::now() - CLAIM_ARRIVAL_RETRY_INTERVAL;
+        assert!(drive_pending_claim(&snapshot, &mut pending).is_none());
+        assert!(snapshot.read().unwrap().pending_claim);
+        pending.as_mut().unwrap().dispatch_reported_at =
+            Some(Instant::now() - CLAIM_ARRIVAL_TIMEOUT);
+        assert!(drive_pending_claim(&snapshot, &mut pending).is_none());
+        assert!(pending.is_none());
+        assert!(!snapshot.read().unwrap().pending_claim);
+        assert_eq!(snapshot.read().unwrap().activities[0].title, "召回超时");
+    }
+
+    #[test]
+    fn only_local_receiver_confirmation_completes_pending_claim() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        let (claim, _) = begin_claim(&snapshot, "test");
+        let nonce = claim.nonce.clone();
+        let mut pending = Some(claim);
+        assert!(confirm_local_arrival(&snapshot, &mut pending, None).is_none());
+        assert!(confirm_local_arrival(&snapshot, &mut pending, Some(2)).is_none());
+        assert!(snapshot.read().unwrap().pending_claim);
+        assert!(matches!(
+            confirm_local_arrival(&snapshot, &mut pending, Some(3)),
+            Some(Payload::ArrivalConfirmed { claim_nonce, channel: 3, .. }) if claim_nonce == nonce
+        ));
+        assert!(pending.is_none());
+        assert!(!snapshot.read().unwrap().pending_claim);
+        assert!(confirm_local_arrival(&snapshot, &mut pending, Some(3)).is_none());
     }
 
     #[test]
@@ -1415,7 +1557,8 @@ mod tests {
             started_at: now,
             last_sent_at: now,
             attempts: 1,
-            dispatch_reported: false,
+            dispatch_reported_at: None,
+            arrival_retries: 0,
             last_failure_detail: None,
         });
 
@@ -1447,7 +1590,8 @@ mod tests {
             started_at: now - CLAIM_TIMEOUT,
             last_sent_at: now - CLAIM_RETRY_INTERVAL,
             attempts: 1,
-            dispatch_reported: false,
+            dispatch_reported_at: None,
+            arrival_retries: 0,
             last_failure_detail: None,
         });
 
@@ -1463,6 +1607,7 @@ mod tests {
             nonce: "same-claim".into(),
             handled_at: Instant::now(),
             accepted: false,
+            completed: false,
             detail: "暂时无法访问接收器".into(),
         }]);
         assert_eq!(
@@ -1477,9 +1622,64 @@ mod tests {
             nonce: "retryable".into(),
             handled_at: Instant::now() - CLAIM_DUPLICATE_WINDOW,
             accepted: false,
+            completed: false,
             detail: "第一次失败".into(),
         }]);
         assert!(cached_claim_result(&recent, "retryable").is_none());
+    }
+
+    #[test]
+    fn accepted_claim_without_arrival_can_retry_after_duplicate_window() {
+        let recent = VecDeque::from([RecentClaim {
+            nonce: "dispatch-without-arrival".into(),
+            handled_at: Instant::now() - CLAIM_DUPLICATE_WINDOW,
+            accepted: true,
+            completed: false,
+            detail: "指令已写入接收器，尚未确认到达".into(),
+        }]);
+        assert!(cached_claim_result(&recent, "dispatch-without-arrival").is_none());
+    }
+
+    #[tokio::test]
+    async fn late_arrival_preserves_local_presence_and_suppresses_old_retries() {
+        let mut state = mac_snapshot();
+        state.keyboard.connected = true;
+        state.keyboard.current_channel = Some(3);
+        let snapshot = Arc::new(RwLock::new(state));
+        let mut recent_claims = VecDeque::from([RecentClaim {
+            nonce: "old-request".into(),
+            handled_at: Instant::now() - CLAIM_DUPLICATE_WINDOW,
+            accepted: true,
+            completed: false,
+            detail: "sent".into(),
+        }]);
+        let (outgoing, _) = broadcast::channel(4);
+        let (event_sender, _) = mpsc::unbounded_channel();
+        handle_network_payload(
+            &snapshot,
+            Payload::ArrivalConfirmed {
+                host_id: "windows-host".into(),
+                claim_nonce: "old-request".into(),
+                channel: 2,
+                sent_at_ms: now_ms(),
+            },
+            None,
+            &outgoing,
+            None,
+            &mut None,
+            &mut recent_claims,
+            &mut None,
+            &event_sender,
+            &mut None,
+        )
+        .await;
+        let state = snapshot.read().unwrap();
+        assert!(state.keyboard.connected);
+        assert_eq!(state.keyboard.current_channel, Some(3));
+        assert_eq!(
+            cached_claim_result(&recent_claims, "old-request"),
+            Some((true, "sent".into()))
+        );
     }
 
     #[test]
@@ -1519,7 +1719,8 @@ mod tests {
             started_at: now,
             last_sent_at: now,
             attempts: 1,
-            dispatch_reported: false,
+            dispatch_reported_at: None,
+            arrival_retries: 0,
             last_failure_detail: None,
         });
         let (outgoing, _) = broadcast::channel(4);
@@ -1556,6 +1757,8 @@ mod tests {
             snapshot.read().unwrap().activities.len(),
             activity_count + 1
         );
+        assert!(pending.as_ref().unwrap().dispatch_reported_at.is_some());
+        assert_eq!(pending.as_ref().unwrap().arrival_retries, 0);
     }
 
     #[tokio::test]

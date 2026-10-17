@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define LOGITECH_VID 0x046D
 #define UNIFYING_PID 0xC52B
@@ -56,6 +57,33 @@ static cached_route_t cached_route;
 static uint8_t reply_buffer[64];
 static CFIndex reply_length;
 static int got_reply;
+static int waiting_for_reply;
+static uint8_t expected_device_index;
+static uint8_t expected_feature_index;
+static uint8_t expected_function;
+
+// Classify only replies to the current query, not receiver notifications or
+// delayed replies to a different function on the same feature.
+int keyclaim_hidpp_response_status(const uint8_t *report, int length,
+                                  int device_index, int feature_index,
+                                  int function) {
+  if (!report || length < 5 ||
+      (report[0] != REPORT_SHORT && report[0] != REPORT_LONG) ||
+      report[1] != device_index)
+    return 0;
+  uint8_t command = (uint8_t)((function << 4) | SOFTWARE_ID);
+  if (report[2] == 0xFF || report[2] == 0x8F)
+    return length >= 6 && report[3] == feature_index && report[4] == command
+               ? -1
+               : 0;
+  return report[2] == feature_index && report[3] == command ? 1 : 0;
+}
+
+static double monotonic_seconds(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
+}
 
 int keyclaim_hid_access_status(void) {
   if (__builtin_available(macOS 10.15, *))
@@ -93,21 +121,29 @@ static void input_callback(void *context, IOReturn result, void *sender,
                            IOHIDReportType type, uint32_t report_id,
                            uint8_t *report, CFIndex length) {
   (void)context;
-  (void)result;
   (void)sender;
-  (void)type;
-  if (length <= 0 || length > (CFIndex)sizeof(reply_buffer) - 1)
-    goto done;
+  if (!waiting_for_reply || got_reply || result != kIOReturnSuccess ||
+      type != kIOHIDReportTypeInput || length <= 0 ||
+      length > (CFIndex)sizeof(reply_buffer) - 1)
+    return;
+  uint8_t normalized[64];
+  CFIndex normalized_length;
   if (report_id != 0 && report[0] != (uint8_t)report_id) {
-    reply_buffer[0] = (uint8_t)report_id;
-    memcpy(reply_buffer + 1, report, (size_t)length);
-    reply_length = length + 1;
+    normalized[0] = (uint8_t)report_id;
+    memcpy(normalized + 1, report, (size_t)length);
+    normalized_length = length + 1;
   } else {
-    memcpy(reply_buffer, report, (size_t)length);
-    reply_length = length;
+    memcpy(normalized, report, (size_t)length);
+    normalized_length = length;
   }
+  if (!keyclaim_hidpp_response_status(normalized, (int)normalized_length,
+                                     expected_device_index,
+                                     expected_feature_index,
+                                     expected_function))
+    return;
+  memcpy(reply_buffer, normalized, (size_t)normalized_length);
+  reply_length = normalized_length;
   got_reply = 1;
-done:
   CFRunLoopStop(CFRunLoopGetCurrent());
 }
 
@@ -125,29 +161,37 @@ static int hidpp_call(IOHIDDeviceRef device, uint8_t report_id,
   frame[3] = (uint8_t)((function << 4) | SOFTWARE_ID);
   if (params && param_count)
     memcpy(frame + 4, params, param_count > 16 ? 16 : param_count);
+  got_reply = 0;
+  reply_length = 0;
+  expected_device_index = device_index;
+  expected_feature_index = feature_index;
+  expected_function = function;
+  waiting_for_reply = output != NULL;
   if (IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, report_id, frame,
-                           length) != kIOReturnSuccess)
+                           length) != kIOReturnSuccess) {
+    waiting_for_reply = 0;
     return 0;
+  }
   if (!output)
     return 1;
 
-  double remaining = timeout_seconds;
-  while (remaining > 0) {
-    got_reply = 0;
-    reply_length = 0;
-    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
-    remaining -= 0.1;
-    if (!got_reply || reply_length < 5 || reply_buffer[1] != device_index)
-      continue;
-    if (reply_buffer[2] == 0xFF || reply_buffer[2] == 0x8F)
-      return 0;
-    if (reply_buffer[2] != feature_index ||
-        (reply_buffer[3] & 0x0F) != SOFTWARE_ID)
-      continue;
-    memcpy(output, reply_buffer, (size_t)reply_length);
-    return 1;
+  double deadline = monotonic_seconds() + timeout_seconds;
+  while (!got_reply) {
+    double remaining = deadline - monotonic_seconds();
+    if (remaining <= 0)
+      break;
+    // A notification can wake the run loop immediately. It must not consume a
+    // fictitious 100ms timeout or overwrite an already matched response.
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode,
+                       remaining < 0.1 ? remaining : 0.1, true);
   }
-  return 0;
+  waiting_for_reply = 0;
+  if (!got_reply || keyclaim_hidpp_response_status(
+                        reply_buffer, (int)reply_length, device_index,
+                        feature_index, function) != 1)
+    return 0;
+  memcpy(output, reply_buffer, (size_t)reply_length);
+  return 1;
 }
 
 static int resolve_feature(IOHIDDeviceRef device, uint8_t report_id,

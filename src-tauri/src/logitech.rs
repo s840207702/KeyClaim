@@ -91,6 +91,15 @@ fn frame_len(report_id: u8) -> usize {
 }
 
 #[cfg(not(target_os = "macos"))]
+fn response_matches(reply: &[u8], device_index: u8, feature_index: u8, function: u8) -> bool {
+    reply.len() >= 5
+        && matches!(reply[0], REPORT_SHORT | REPORT_LONG)
+        && reply[1] == device_index
+        && reply[2] == feature_index
+        && reply[3] == (function << 4) | SOFTWARE_ID
+}
+
+#[cfg(not(target_os = "macos"))]
 fn request(
     device: &HidDevice,
     report_id: u8,
@@ -121,7 +130,7 @@ fn request(
         if reply[2] == 0xff || reply[2] == 0x8f {
             continue;
         }
-        if reply[2] == feature_index && reply[3] & 0x0f == SOFTWARE_ID {
+        if response_matches(&reply[..size], device_index, feature_index, function) {
             return Ok(reply[..size].to_vec());
         }
     }
@@ -417,6 +426,46 @@ pub fn switch_to(channel: u8) -> Result<SwitchPath, LogitechError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn response_requires_matching_device_feature_and_function() {
+        let response = [REPORT_LONG, 1, 7, SOFTWARE_ID, 3, 1, 0];
+        assert!(response_matches(&response, 1, 7, 0));
+        assert!(!response_matches(&response, 2, 7, 0));
+        assert!(!response_matches(&response, 1, 8, 0));
+        assert!(!response_matches(&response, 1, 7, 1));
+        assert!(!response_matches(&response[..4], 1, 7, 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_response_ignores_notifications_and_other_function_replies() {
+        unsafe extern "C" {
+            fn keyclaim_hidpp_response_status(
+                report: *const u8,
+                length: i32,
+                device: i32,
+                feature: i32,
+                function: i32,
+            ) -> i32;
+        }
+        let status = |report: &[u8], function| {
+            // SAFETY: C only reads this live slice, bounded by its explicit length.
+            unsafe {
+                keyclaim_hidpp_response_status(report.as_ptr(), report.len() as i32, 1, 7, function)
+            }
+        };
+        let response = [0x11, 1, 7, 0x0a, 3, 1, 0];
+        assert_eq!(status(&response, 0), 1);
+        assert_eq!(status(&response, 1), 0);
+        assert_eq!(status(&[0x11, 2, 7, 0x0a, 3, 1, 0], 0), 0);
+        assert_eq!(status(&[0x11, 1, 8, 0x0a, 3, 1, 0], 0), 0);
+        assert_eq!(status(&response[..4], 0), 0);
+        assert_eq!(status(&[0x11, 1, 0xff, 8, 0x0a, 1, 0], 0), 0);
+        assert_eq!(status(&[0x11, 1, 0xff, 7, 0x1a, 1, 0], 0), 0);
+        assert_eq!(status(&[0x11, 1, 0xff, 7, 0x0a, 1, 0], 0), -1);
+    }
 
     #[test]
     fn invalid_channel_fails_without_touching_hardware() {
