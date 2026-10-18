@@ -15,10 +15,10 @@ KeyClaim 检测本机鼠标或触控板活动，通过局域网通知当前持�
 
 | 平台 | 当前公开安装包 | 安装方法 |
 | --- | --- | --- |
-| Windows 10 / 11 x64 | [KeyClaim_0.2.8_x64-setup.exe](https://github.com/s840207702/KeyClaim/releases/download/v0.2.8/KeyClaim_0.2.8_x64-setup.exe) | 退出旧版后运行安装向导；需要 WebView2 Runtime |
-| macOS Apple Silicon | [KeyClaim_0.2.8_aarch64.dmg](https://github.com/s840207702/KeyClaim/releases/download/v0.2.8/KeyClaim_0.2.8_aarch64.dmg) | 打开 DMG，将 KeyClaim.app 拖入 Applications |
+| Windows 10 / 11 x64 | [KeyClaim_0.2.9_x64-setup.exe](https://github.com/s840207702/KeyClaim/releases/download/v0.2.9/KeyClaim_0.2.9_x64-setup.exe) | 退出旧版后运行安装向导；需要 WebView2 Runtime |
+| macOS Apple Silicon | [KeyClaim_0.2.9_aarch64.dmg](https://github.com/s840207702/KeyClaim/releases/download/v0.2.9/KeyClaim_0.2.9_aarch64.dmg) | 打开 DMG，将 KeyClaim.app 拖入 Applications |
 
-最新源码和两个平台的公开安装包均为 0.2.8。macOS 仅提供 Apple Silicon 包，完整最低系统版本兼容性尚未逐一验证。
+最新源码和两个平台的公开安装包均为 0.2.9。macOS 仅提供 Apple Silicon 包，完整最低系统版本兼容性尚未逐一验证。
 
 Windows 安装包未签名，Mac 包未经过 Apple 公证，系统可能提示或阻止打开。请核对 Release 的 `SHA256SUMS.txt`，并一并保留许可证附件；不要关闭 SmartScreen、Gatekeeper 等系统安全保护。
 
@@ -58,8 +58,9 @@ Windows 关闭窗口后仍驻留托盘；Mac 默认驻留菜单栏、不占 Dock
 - 配对码用于签名校验；消息有时效和重复请求检查，但通信不加密。配置及配对码保存在本机，没有云账号、遥测或公网中继。
 - macOS 使用原生输入监听，Windows 使用 Raw Input；不记录按键内容。
 - 当前持有方深度休眠时，仍需用 Easy-Switch 手动切换。
+- 0.2.9 修复 macOS 后台键盘探测的临时对象积累，避免长时间运行后内存持续增长；Windows 同步升级版本，保留现有切换和通信逻辑。
 - 0.2.8 修复过早判定召回超时、重试被去重记录阻止，以及 Mac 接收器读取被无关消息干扰的问题；成功仍须由目标接收器确认键盘上线。
-- 已验证现有双机的安装启动、单进程、端口、握手和双向实机切换；本轮 7 次切换全部到达目标通道，未再记录召回超时，但尚未完成长期稳定性与全部兼容性验收。
+- 0.2.8 已验证现有双机的安装启动、单进程、端口、握手和双向实机切换；当时 7 次切换全部到达目标通道，未再记录召回超时，但尚未完成长期稳定性与全部兼容性验收。
 
 详见 [技术架构](docs/ARCHITECTURE.md)、[设计规格](docs/design/SPEC.md) 与 [安全说明](SECURITY.md)。
 
@@ -82,5 +83,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\diagnose-windows.ps1
 ## 开发与许可证
 
 构建依赖、目录职责、检查命令与本地发布方法统一放在 [开发与贡献说明](CONTRIBUTING.md)。GitHub Actions 保持关闭，不会因提交自动构建。
+
+macOS 上可在接收器与键盘在线、已允许输入监控的情况下运行 `npm run test:memory`。该检查预热后读取键盘状态 500 次，限制堆内存增长，不切换通道；缺少权限或硬件时以退出码 77 表示未运行，不视为通过。
 
 自有代码采用 [MIT License](LICENSE)，允许修改、分发和商用，须保留版权及许可声明，不提供担保。HID++ 协议与部分 Mac 接收器逻辑参考 [mxswitch](https://github.com/marcocosta97/mxswitch)，第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。历史开源检查见 [开源准备记录](docs/OPEN_SOURCE_READINESS.md)。

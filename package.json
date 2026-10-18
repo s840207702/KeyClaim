@@ -1,7 +1,7 @@
 {
   "name": "keyclaim",
   "private": true,
-  "version": "0.2.8",
+  "version": "0.2.9",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -19,6 +19,7 @@
     "build:windows": "node scripts/build-release.mjs --bundles nsis",
     "build:mac": "bash scripts/build-macos-local.sh",
     "test": "vitest run",
+    "test:memory": "node scripts/check-macos-memory.mjs",
     "test:watch": "vitest",
     "check": "node scripts/check.mjs",
     "preview": "vite preview",

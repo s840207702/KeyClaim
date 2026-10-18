@@ -86,15 +86,19 @@ static double monotonic_seconds(void) {
 }
 
 int keyclaim_hid_access_status(void) {
-  if (__builtin_available(macOS 10.15, *))
-    return (int)IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
-  return (int)kIOHIDAccessTypeGranted;
+  @autoreleasepool {
+    if (__builtin_available(macOS 10.15, *))
+      return (int)IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
+    return (int)kIOHIDAccessTypeGranted;
+  }
 }
 
 int keyclaim_request_hid_access(void) {
-  if (__builtin_available(macOS 10.15, *))
-    return IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) ? 1 : 0;
-  return 1;
+  @autoreleasepool {
+    if (__builtin_available(macOS 10.15, *))
+      return IOHIDRequestAccess(kIOHIDRequestTypeListenEvent) ? 1 : 0;
+    return 1;
+  }
 }
 
 static int32_t property_int(IOHIDDeviceRef device, CFStringRef key) {
@@ -407,7 +411,7 @@ static int find_keyboard(target_t *target) {
   return found;
 }
 
-int keyclaim_probe_keyboard(keyclaim_probe_result *output) {
+static int probe_keyboard(keyclaim_probe_result *output) {
   if (!output)
     return 0;
   target_t target;
@@ -439,7 +443,7 @@ int keyclaim_probe_keyboard(keyclaim_probe_result *output) {
   return success;
 }
 
-int keyclaim_switch_keyboard(int channel) {
+static int switch_keyboard(int channel) {
   if (channel < 1 || channel > 3)
     return 0;
   target_t target;
@@ -468,4 +472,19 @@ int keyclaim_switch_keyboard(int channel) {
     return 0;
   }
   return used_cache ? 2 : 1;
+}
+
+// These entry points also run on long-lived Rust worker threads, which do not
+// inherit AppKit's event-loop autorelease pools. Drain IOKit's temporary objects
+// after every operation rather than retaining them until the thread exits.
+int keyclaim_probe_keyboard(keyclaim_probe_result *output) {
+  @autoreleasepool {
+    return probe_keyboard(output);
+  }
+}
+
+int keyclaim_switch_keyboard(int channel) {
+  @autoreleasepool {
+    return switch_keyboard(channel);
+  }
 }
