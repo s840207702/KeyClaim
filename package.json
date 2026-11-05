@@ -1,7 +1,7 @@
 {
   "name": "keyclaim",
   "private": true,
-  "version": "0.2.9",
+  "version": "0.3.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -10,7 +10,7 @@
   "engines": {
     "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
-  "description": "KeyClaim · 键来：让 MX Keys 跟随本地人工输入，在 Windows 与 macOS 之间自动归位。",
+  "description": "KeyClaim · 键来：让 MX Keys 在三台局域网设备之间跟随本地人工输入自动归位。",
   "type": "module",
   "scripts": {
     "dev": "vite",

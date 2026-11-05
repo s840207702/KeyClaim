@@ -1,8 +1,8 @@
 use std::{
-    collections::{BTreeSet, VecDeque},
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    collections::{BTreeSet, HashMap, VecDeque},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -25,7 +25,7 @@ use tokio::{
 use crate::{
     input::{self, InputIntentGate, PointerActivity},
     logitech,
-    model::{ActivityEntry, AppConfig, AppSnapshot},
+    model::{ActivityEntry, AppConfig, AppSnapshot, HostView},
     protocol::{self, Payload},
 };
 
@@ -43,6 +43,8 @@ const CLAIM_DUPLICATE_WINDOW: Duration = Duration::from_millis(500);
 const CLAIM_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(6);
 const CLAIM_ARRIVAL_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 const CLAIM_MAX_ARRIVAL_RETRIES: u8 = 3;
+const KEYBOARD_CHANNEL_COUNT: u8 = 3;
+const EXPECTED_REMOTE_HOSTS: usize = KEYBOARD_CHANNEL_COUNT as usize - 1;
 
 enum LocalEvent {
     PointerActivity(PointerActivity),
@@ -108,10 +110,14 @@ impl ActiveRemoteSwitch {
                 .any(|candidate| candidate == nonce)
     }
 
-    fn coalesce(&mut self, nonce: String) {
+    fn coalesce(&mut self, nonce: String, channel: u8) -> bool {
+        if self.channel != channel {
+            return false;
+        }
         if !self.contains(&nonce) {
             self.coalesced_nonces.push(nonce);
         }
+        true
     }
 
     fn all_nonces(self) -> impl Iterator<Item = String> {
@@ -158,8 +164,9 @@ impl Runtime {
         snapshot.local_host.name = config.host_name.clone();
         snapshot.local_host.platform = config.platform.clone();
         snapshot.local_host.channel = config.channel;
-        snapshot.peer_host.channel = config.peer_channel;
+        snapshot.local_host.host_id = config.host_id.clone();
         snapshot.config = config;
+        sync_local_host(&mut snapshot);
     }
 
     pub fn refresh_hardware(&self) {
@@ -190,6 +197,7 @@ impl Runtime {
                 snapshot.keyboard.last_error =
                     Some("请在系统设置 → 隐私与安全性 → 输入监控中允许 KeyClaim".into());
             }
+            sync_local_host(&mut snapshot);
         }
         if granted {
             let _ = self.events.send(LocalEvent::RefreshHardware);
@@ -218,6 +226,37 @@ impl Runtime {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+fn valid_channel(channel: u8) -> bool {
+    (1..=KEYBOARD_CHANNEL_COUNT).contains(&channel)
+}
+
+fn upsert_host(hosts: &mut Vec<crate::model::HostView>, host: crate::model::HostView) {
+    hosts.retain(|known| known.host_id != host.host_id && known.channel != host.channel);
+    hosts.push(host);
+    hosts.sort_by_key(|known| known.channel);
+}
+
+fn sync_local_host(state: &mut AppSnapshot) {
+    state.local_host.host_id = state.config.host_id.clone();
+    state.local_host.name = state.config.host_name.clone();
+    state.local_host.platform = state.config.platform.clone();
+    state.local_host.channel = state.config.channel;
+    state.local_host.online = true;
+    state.local_host.last_seen_ms = Some(now_ms());
+    upsert_host(&mut state.hosts, state.local_host.clone());
+}
+
+fn upsert_remote_host(state: &mut AppSnapshot, host: crate::model::HostView) -> bool {
+    let was_online = state
+        .hosts
+        .iter()
+        .find(|known| known.host_id == host.host_id || known.channel == host.channel)
+        .is_some_and(|known| known.online);
+    state.peer_host = host.clone();
+    upsert_host(&mut state.hosts, host);
+    !was_online
 }
 
 fn add_activity(snapshot: &mut AppSnapshot, title: &str, detail: String, kind: &str) {
@@ -282,6 +321,10 @@ async fn run_loop(
         .expect("snapshot poisoned")
         .config
         .network_port;
+    let is_windows_hub = matches!(
+        snapshot.read().expect("snapshot poisoned").config.platform,
+        crate::model::Platform::Windows
+    );
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).await.ok();
     let tcp_listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await.ok();
     if let Some(socket) = &socket {
@@ -297,6 +340,7 @@ async fn run_loop(
     let (tcp_outgoing, _) = broadcast::channel::<Vec<u8>>(64);
     let (tcp_incoming_sender, mut tcp_incoming) = mpsc::unbounded_channel::<Vec<u8>>();
     let active_tcp_connections = Arc::new(AtomicUsize::new(0));
+    let connected_tcp_peers = Arc::new(Mutex::new(BTreeSet::<IpAddr>::new()));
     let tcp_scan_in_progress = Arc::new(AtomicBool::new(false));
     let mut packet = [0u8; 4_096];
     let mut heartbeat = tokio::time::interval(Duration::from_millis(900));
@@ -309,7 +353,7 @@ async fn run_loop(
     let hardware_probe_in_progress = Arc::new(AtomicBool::new(false));
     let mut pending_claim: Option<PendingClaim> = None;
     let mut intent_gate = InputIntentGate::new();
-    let mut peer_addr: Option<SocketAddr> = None;
+    let mut peer_addrs = HashMap::<String, SocketAddr>::new();
     let mut recent_claims = VecDeque::new();
     let mut recent_messages = VecDeque::new();
     let mut active_remote_switch: Option<ActiveRemoteSwitch> = None;
@@ -317,13 +361,13 @@ async fn run_loop(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                mark_stale_peer(&snapshot);
+                mark_stale_hosts(&snapshot);
                 send_payload(
                     socket.as_ref(),
                     &tcp_outgoing,
                     &snapshot,
                     heartbeat_payload(&snapshot),
-                    peer_addr,
+                    &peer_addrs,
                 ).await;
             }
             _ = claim_retry.tick() => {
@@ -333,27 +377,24 @@ async fn run_loop(
                         &tcp_outgoing,
                         &snapshot,
                         payload,
-                        peer_addr,
+                        &peer_addrs,
                     ).await;
                 }
             }
             _ = peer_discovery.tick() => {
-                let platform = {
-                    let state = snapshot.read().expect("snapshot poisoned");
-                    state.config.platform.clone()
-                };
-                if should_start_tcp_discovery(
-                    active_tcp_connections.load(Ordering::Relaxed),
-                ) {
-                    if matches!(platform, crate::model::Platform::Windows) {
-                        start_tcp_discovery_sweep(
-                            port,
-                            tcp_outgoing.clone(),
-                            tcp_incoming_sender.clone(),
-                            active_tcp_connections.clone(),
-                            tcp_scan_in_progress.clone(),
-                        );
-                    }
+                let connected_peer_count = connected_tcp_peers
+                    .lock()
+                    .map(|peers| peers.len())
+                    .unwrap_or_default();
+                if should_start_tcp_discovery(connected_peer_count) && is_windows_hub {
+                    start_tcp_discovery_sweep(
+                        port,
+                        tcp_outgoing.clone(),
+                        tcp_incoming_sender.clone(),
+                        active_tcp_connections.clone(),
+                        connected_tcp_peers.clone(),
+                        tcp_scan_in_progress.clone(),
+                    );
                 }
             }
             _ = hardware_scan.tick() => {
@@ -376,7 +417,7 @@ async fn run_loop(
                             &tcp_outgoing,
                             &snapshot,
                             payload,
-                            peer_addr,
+                            &peer_addrs,
                         ).await;
                     }
                 }
@@ -417,7 +458,7 @@ async fn run_loop(
                                         detail: detail.clone(),
                                         sent_at_ms: now_ms(),
                                     },
-                                    peer_addr,
+                                    &peer_addrs,
                                 ).await;
                             }
                         }
@@ -455,7 +496,7 @@ async fn run_loop(
                             &tcp_outgoing,
                             &snapshot,
                             payload,
-                            peer_addr,
+                            &peer_addrs,
                         ).await;
                     }
                 }
@@ -498,7 +539,7 @@ async fn run_loop(
                             &tcp_outgoing,
                             &snapshot,
                             payload,
-                            peer_addr,
+                            &peer_addrs,
                         ).await;
                     } else {
                         start_hardware_switch(
@@ -524,13 +565,14 @@ async fn run_loop(
                         &code,
                         &mut recent_messages,
                     ) {
+                        relay_incoming_frame(is_windows_hub, &tcp_outgoing, &packet[..size]);
                         handle_network_payload(
                             &snapshot,
                             payload,
                             socket.as_ref(),
                             &tcp_outgoing,
                             Some(source),
-                            &mut peer_addr,
+                            &mut peer_addrs,
                             &mut recent_claims,
                             &mut pending_claim,
                             &event_sender,
@@ -545,12 +587,14 @@ async fn run_loop(
                     None => std::future::pending().await,
                 }
             } => {
-                if let Some((stream, _)) = accepted {
+                if let Some((stream, peer)) = accepted {
                     spawn_tcp_connection(
                         stream,
                         tcp_outgoing.clone(),
                         tcp_incoming_sender.clone(),
                         active_tcp_connections.clone(),
+                        connected_tcp_peers.clone(),
+                        Some(peer.ip()),
                     );
                 }
             }
@@ -562,13 +606,14 @@ async fn run_loop(
                         &code,
                         &mut recent_messages,
                     ) {
+                        relay_incoming_frame(is_windows_hub, &tcp_outgoing, &bytes);
                         handle_network_payload(
                             &snapshot,
                             payload,
                             socket.as_ref(),
                             &tcp_outgoing,
                             None,
-                            &mut peer_addr,
+                            &mut peer_addrs,
                             &mut recent_claims,
                             &mut pending_claim,
                             &event_sender,
@@ -581,12 +626,34 @@ async fn run_loop(
     }
 }
 
+fn relay_incoming_frame(
+    is_windows_hub: bool,
+    tcp_outgoing: &broadcast::Sender<Vec<u8>>,
+    bytes: &[u8],
+) {
+    if is_windows_hub {
+        // 两台 Mac 不需要互相主动扫描；Windows 已分别持有两条 TCP 连接，
+        // 在这里转发已通过签名校验的原始帧，让 Mac mini ↔ MacBook 也走可靠链路。
+        let _ = tcp_outgoing.send(bytes.to_vec());
+    }
+}
+
 fn spawn_tcp_connection(
     stream: TcpStream,
     outgoing: broadcast::Sender<Vec<u8>>,
     incoming: mpsc::UnboundedSender<Vec<u8>>,
     active_connections: Arc<AtomicUsize>,
+    connected_peers: Arc<Mutex<BTreeSet<IpAddr>>>,
+    peer_ip: Option<IpAddr>,
 ) {
+    if let Some(peer_ip) = peer_ip {
+        let Ok(mut peers) = connected_peers.lock() else {
+            return;
+        };
+        if peers.len() >= EXPECTED_REMOTE_HOSTS || !peers.insert(peer_ip) {
+            return;
+        }
+    }
     let mut outgoing = outgoing.subscribe();
     tauri::async_runtime::spawn(async move {
         active_connections.fetch_add(1, Ordering::Relaxed);
@@ -636,6 +703,11 @@ fn spawn_tcp_connection(
             _ = write_loop => {},
         }
         active_connections.fetch_sub(1, Ordering::Relaxed);
+        if let Some(peer_ip) = peer_ip
+            && let Ok(mut peers) = connected_peers.lock()
+        {
+            peers.remove(&peer_ip);
+        }
     });
 }
 
@@ -644,38 +716,44 @@ fn start_tcp_discovery_sweep(
     outgoing: broadcast::Sender<Vec<u8>>,
     incoming: mpsc::UnboundedSender<Vec<u8>>,
     active_connections: Arc<AtomicUsize>,
+    connected_peers: Arc<Mutex<BTreeSet<IpAddr>>>,
     scan_in_progress: Arc<AtomicBool>,
 ) {
     if scan_in_progress.swap(true, Ordering::AcqRel) {
         return;
     }
     tauri::async_runtime::spawn(async move {
+        let known_peers = connected_peers
+            .lock()
+            .map(|peers| peers.clone())
+            .unwrap_or_default();
         let mut attempts = Vec::new();
-        for target in tcp_discovery_targets(port) {
+        for target in tcp_discovery_targets(port)
+            .into_iter()
+            .filter(|target| !known_peers.contains(&IpAddr::V4(*target.ip())))
+        {
             attempts.push(tauri::async_runtime::spawn(async move {
                 tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(target))
                     .await
                     .ok()
                     .and_then(Result::ok)
+                    .map(|stream| (IpAddr::V4(*target.ip()), stream))
             }));
         }
-        let mut selected_stream = None;
         for attempt in attempts {
-            if let Ok(Some(stream)) = attempt.await {
-                retain_first(&mut selected_stream, stream);
+            if let Ok(Some((peer_ip, stream))) = attempt.await {
+                spawn_tcp_connection(
+                    stream,
+                    outgoing.clone(),
+                    incoming.clone(),
+                    active_connections.clone(),
+                    connected_peers.clone(),
+                    Some(peer_ip),
+                );
             }
-        }
-        if let Some(stream) = selected_stream {
-            spawn_tcp_connection(stream, outgoing, incoming, active_connections);
         }
         scan_in_progress.store(false, Ordering::Release);
     });
-}
-
-fn retain_first<T>(selected: &mut Option<T>, candidate: T) {
-    if selected.is_none() {
-        *selected = Some(candidate);
-    }
 }
 
 fn tcp_discovery_targets(port: u16) -> Vec<SocketAddrV4> {
@@ -743,7 +821,7 @@ async fn send_payload(
     tcp_outgoing: &broadcast::Sender<Vec<u8>>,
     snapshot: &Arc<RwLock<AppSnapshot>>,
     payload: Payload,
-    peer_addr: Option<SocketAddr>,
+    peer_addrs: &HashMap<String, SocketAddr>,
 ) {
     let (code, port) = {
         let state = snapshot.read().expect("snapshot poisoned");
@@ -755,7 +833,7 @@ async fn send_payload(
             for target in discovery_targets(port) {
                 let _ = socket.send_to(&bytes, target).await;
             }
-            if let Some(peer_addr) = peer_addr {
+            for peer_addr in peer_addrs.values() {
                 let _ = socket.send_to(&bytes, peer_addr).await;
             }
         }
@@ -844,7 +922,7 @@ async fn handle_network_payload(
     socket: Option<&UdpSocket>,
     tcp_outgoing: &broadcast::Sender<Vec<u8>>,
     udp_source: Option<SocketAddr>,
-    peer_addr: &mut Option<SocketAddr>,
+    peer_addrs: &mut HashMap<String, SocketAddr>,
     recent_claims: &mut VecDeque<RecentClaim>,
     pending_claim: &mut Option<PendingClaim>,
     event_sender: &mpsc::UnboundedSender<LocalEvent>,
@@ -862,26 +940,35 @@ async fn handle_network_payload(
             sent_at_ms,
         } => {
             let mut state = snapshot.write().expect("snapshot poisoned");
-            if host_id == state.config.host_id || (now_ms() - sent_at_ms).abs() > MESSAGE_MAX_AGE_MS
+            if host_id == state.config.host_id
+                || !valid_channel(channel)
+                || channel == state.config.channel
+                || (now_ms() - sent_at_ms).abs() > MESSAGE_MAX_AGE_MS
             {
                 return;
             }
             if let Some(source) = udp_source {
-                *peer_addr = Some(source);
+                peer_addrs.insert(host_id.clone(), source);
             }
-            let was_offline = !state.peer_host.online;
-            state.peer_host.name = host_name;
-            state.peer_host.platform = platform;
-            state.peer_host.channel = channel;
-            state.peer_host.online = true;
-            state.peer_host.ready = ready;
-            state.peer_host.last_seen_ms = Some(now_ms());
+            let display_name = host_name.clone();
+            let came_online = upsert_remote_host(
+                &mut state,
+                HostView {
+                    host_id,
+                    name: host_name,
+                    platform,
+                    channel,
+                    online: true,
+                    ready,
+                    last_seen_ms: Some(now_ms()),
+                },
+            );
             record_peer_keyboard_channel(&mut state, keyboard_connected, current_channel);
-            if was_offline {
+            if came_online {
                 add_activity(
                     &mut state,
-                    "另一台电脑已就绪",
-                    "局域网握手成功".into(),
+                    "设备已就绪",
+                    format!("{display_name} · 通道 {channel} · 局域网握手成功"),
                     "network",
                 );
             }
@@ -900,12 +987,20 @@ async fn handle_network_payload(
                 return;
             }
             if let Some(source) = udp_source {
-                *peer_addr = Some(source);
+                peer_addrs.insert(host_id.clone(), source);
             }
             let Some((accepted, detail)) = cached_claim_result(recent_claims, &nonce) else {
+                if !snapshot
+                    .read()
+                    .expect("snapshot poisoned")
+                    .keyboard
+                    .connected
+                {
+                    return;
+                }
                 cancel_pending_claim(snapshot, pending_claim);
                 if let Some(active) = active_remote_switch.as_mut() {
-                    active.coalesce(nonce);
+                    active.coalesce(nonce, channel);
                     return;
                 }
                 *active_remote_switch = Some(ActiveRemoteSwitch::new(nonce.clone(), channel));
@@ -931,7 +1026,7 @@ async fn handle_network_payload(
                 detail,
                 sent_at_ms: now_ms(),
             };
-            send_payload(socket, tcp_outgoing, snapshot, payload, *peer_addr).await;
+            send_payload(socket, tcp_outgoing, snapshot, payload, peer_addrs).await;
         }
         Payload::SwitchDispatched {
             host_id,
@@ -948,7 +1043,7 @@ async fn handle_network_payload(
             }
             drop(state);
             if let Some(source) = udp_source {
-                *peer_addr = Some(source);
+                peer_addrs.insert(host_id, source);
             }
             let Some(pending) = pending_claim.as_mut().filter(|pending| {
                 pending.nonce == claim_nonce && pending.channel == target_channel
@@ -984,13 +1079,14 @@ async fn handle_network_payload(
         } => {
             let mut state = snapshot.write().expect("snapshot poisoned");
             if host_id == state.config.host_id
-                || channel != state.config.peer_channel
+                || !valid_channel(channel)
+                || channel == state.config.channel
                 || (now_ms() - sent_at_ms).abs() > MESSAGE_MAX_AGE_MS
             {
                 return;
             }
             if let Some(source) = udp_source {
-                *peer_addr = Some(source);
+                peer_addrs.insert(host_id, source);
             }
             if let Some(claim) = recent_claims
                 .iter_mut()
@@ -1179,7 +1275,8 @@ fn cancel_pending_claim(
 
 fn claim_is_authorized(state: &AppSnapshot, host_id: &str, channel: u8, sent_at_ms: i64) -> bool {
     host_id != state.config.host_id
-        && channel == state.config.peer_channel
+        && valid_channel(channel)
+        && channel != state.config.channel
         && (now_ms() - sent_at_ms).abs() <= MESSAGE_MAX_AGE_MS
 }
 
@@ -1282,6 +1379,7 @@ fn apply_hardware_probe(
         state.keyboard.current_channel = None;
         state.keyboard.supports_change_host = false;
         state.keyboard.last_error = outcome.result.err();
+        sync_local_host(&mut state);
         return None;
     }
 
@@ -1289,6 +1387,7 @@ fn apply_hardware_probe(
     state.diagnostics.hid_access = true;
     state.diagnostics.receiver_probe = true;
     state.local_host.ready = true;
+    sync_local_host(&mut state);
     match outcome.result {
         Ok(found) => {
             let channel = found.current_channel;
@@ -1315,8 +1414,8 @@ fn should_request_claim(state: &AppSnapshot) -> bool {
         && !state.pending_claim
 }
 
-fn should_start_tcp_discovery(active_connections: usize) -> bool {
-    active_connections == 0
+fn should_start_tcp_discovery(connected_peer_count: usize) -> bool {
+    connected_peer_count < EXPECTED_REMOTE_HOSTS
 }
 
 fn record_peer_keyboard_channel(
@@ -1367,9 +1466,10 @@ mod tests {
     }
 
     #[test]
-    fn tcp_discovery_depends_on_connection_instead_of_udp_peer_status() {
+    fn tcp_discovery_keeps_searching_until_both_remote_hosts_are_connected() {
         assert!(should_start_tcp_discovery(0));
-        assert!(!should_start_tcp_discovery(1));
+        assert!(should_start_tcp_discovery(1));
+        assert!(!should_start_tcp_discovery(2));
     }
 
     #[test]
@@ -1570,13 +1670,21 @@ mod tests {
     #[test]
     fn concurrent_remote_claims_share_one_hardware_switch() {
         let mut active = ActiveRemoteSwitch::new("first".into(), 2);
-        active.coalesce("second".into());
-        active.coalesce("second".into());
+        assert!(active.coalesce("second".into(), 2));
+        assert!(active.coalesce("second".into(), 2));
 
         assert_eq!(
             active.all_nonces().collect::<Vec<_>>(),
             vec!["first".to_string(), "second".to_string()]
         );
+    }
+
+    #[test]
+    fn different_remote_channels_do_not_share_one_hardware_switch() {
+        let mut active = ActiveRemoteSwitch::new("channel-1".into(), 1);
+        assert!(!active.coalesce("channel-3".into(), 3));
+
+        assert_eq!(active.all_nonces().collect::<Vec<_>>(), vec!["channel-1"]);
     }
 
     #[test]
@@ -1655,6 +1763,9 @@ mod tests {
         }]);
         let (outgoing, _) = broadcast::channel(4);
         let (event_sender, _) = mpsc::unbounded_channel();
+        let mut peer_addrs = HashMap::new();
+        let mut pending_claim = None;
+        let mut active_remote_switch = None;
         handle_network_payload(
             &snapshot,
             Payload::ArrivalConfirmed {
@@ -1666,11 +1777,11 @@ mod tests {
             None,
             &outgoing,
             None,
-            &mut None,
+            &mut peer_addrs,
             &mut recent_claims,
-            &mut None,
+            &mut pending_claim,
             &event_sender,
-            &mut None,
+            &mut active_remote_switch,
         )
         .await;
         let state = snapshot.read().unwrap();
@@ -1724,7 +1835,7 @@ mod tests {
             last_failure_detail: None,
         });
         let (outgoing, _) = broadcast::channel(4);
-        let mut peer_addr = None;
+        let mut peer_addrs = HashMap::new();
         let mut recent_claims = VecDeque::new();
         let (event_sender, _) = mpsc::unbounded_channel();
         let mut active_remote_switch = None;
@@ -1744,7 +1855,7 @@ mod tests {
                 None,
                 &outgoing,
                 None,
-                &mut peer_addr,
+                &mut peer_addrs,
                 &mut recent_claims,
                 &mut pending,
                 &event_sender,
@@ -1772,12 +1883,13 @@ mod tests {
         state.config.network_port = 59_999;
         let snapshot = Arc::new(RwLock::new(state));
         let (tcp_outgoing, _) = broadcast::channel(4);
+        let peer_addrs = HashMap::from([("peer".into(), peer_addr)]);
         send_payload(
             Some(&sender),
             &tcp_outgoing,
             &snapshot,
             heartbeat_payload(&snapshot),
-            Some(peer_addr),
+            &peer_addrs,
         )
         .await;
 
@@ -1802,7 +1914,14 @@ mod tests {
         let (incoming_sender, mut incoming) = mpsc::unbounded_channel();
         let active = Arc::new(AtomicUsize::new(0));
 
-        spawn_tcp_connection(server, outgoing.clone(), incoming_sender, active.clone());
+        spawn_tcp_connection(
+            server,
+            outgoing.clone(),
+            incoming_sender,
+            active.clone(),
+            Arc::new(Mutex::new(BTreeSet::new())),
+            None,
+        );
         tokio::time::timeout(Duration::from_secs(1), async {
             while active.load(Ordering::Relaxed) == 0 {
                 tokio::task::yield_now().await;
@@ -1826,12 +1945,16 @@ mod tests {
         assert_eq!(received, b"to-peer");
     }
 
-    #[test]
-    fn discovery_keeps_only_the_first_connected_stream() {
-        let mut selected = None;
-        retain_first(&mut selected, "first");
-        retain_first(&mut selected, "second");
-        assert_eq!(selected, Some("first"));
+    #[tokio::test]
+    async fn windows_hub_relays_verified_frames_between_both_mac_connections() {
+        let (outgoing, _) = broadcast::channel(4);
+        let mut receiver = outgoing.subscribe();
+
+        relay_incoming_frame(true, &outgoing, b"verified-frame");
+        assert_eq!(receiver.recv().await.unwrap(), b"verified-frame");
+
+        relay_incoming_frame(false, &outgoing, b"mac-does-not-relay");
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1844,7 +1967,14 @@ mod tests {
         let (incoming_sender, mut incoming) = mpsc::unbounded_channel();
         let active = Arc::new(AtomicUsize::new(0));
 
-        spawn_tcp_connection(server, outgoing.clone(), incoming_sender, active);
+        spawn_tcp_connection(
+            server,
+            outgoing.clone(),
+            incoming_sender,
+            active,
+            Arc::new(Mutex::new(BTreeSet::new())),
+            None,
+        );
 
         let incoming_payload = b"complete-frame";
         let length = (incoming_payload.len() as u32).to_be_bytes();
@@ -1880,6 +2010,7 @@ mod tests {
             state.config.peer_channel,
             now_ms(),
         ));
+        assert!(claim_is_authorized(&state, "mac-mini", 1, now_ms()));
     }
 
     #[test]
@@ -1905,6 +2036,149 @@ mod tests {
             state.config.peer_channel,
             current - MESSAGE_MAX_AGE_MS - 1,
         ));
+        assert!(!claim_is_authorized(&state, "unknown", 0, current));
+        assert!(!claim_is_authorized(&state, "unknown", 4, current));
+    }
+
+    #[tokio::test]
+    async fn heartbeats_populate_all_three_channels_without_overwriting_peers() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        let (outgoing, _) = broadcast::channel(4);
+        let (event_sender, _) = mpsc::unbounded_channel();
+        let mut peer_addrs = HashMap::new();
+        let mut recent_claims = VecDeque::new();
+        let mut pending_claim = None;
+        let mut active_remote_switch = None;
+
+        for (host_id, name, platform, channel) in [
+            ("windows", "Windows 工作站", Platform::Windows, 2),
+            ("mac-mini", "Mac mini", Platform::Macos, 1),
+        ] {
+            handle_network_payload(
+                &snapshot,
+                Payload::Heartbeat {
+                    host_id: host_id.into(),
+                    host_name: name.into(),
+                    platform,
+                    channel,
+                    ready: true,
+                    keyboard_connected: false,
+                    current_channel: None,
+                    sent_at_ms: now_ms(),
+                },
+                None,
+                &outgoing,
+                None,
+                &mut peer_addrs,
+                &mut recent_claims,
+                &mut pending_claim,
+                &event_sender,
+                &mut active_remote_switch,
+            )
+            .await;
+        }
+
+        let state = snapshot.read().unwrap();
+        assert_eq!(
+            state
+                .hosts
+                .iter()
+                .map(|host| host.channel)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            state
+                .hosts
+                .iter()
+                .map(|host| host.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Mac mini",
+                "Windows 工作站",
+                state.config.host_name.as_str()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_cannot_overwrite_the_local_channel() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        let local_host_id = snapshot.read().unwrap().config.host_id.clone();
+        let (outgoing, _) = broadcast::channel(4);
+        let (event_sender, _) = mpsc::unbounded_channel();
+        let mut peer_addrs = HashMap::new();
+        let mut recent_claims = VecDeque::new();
+        let mut pending_claim = None;
+        let mut active_remote_switch = None;
+
+        handle_network_payload(
+            &snapshot,
+            Payload::Heartbeat {
+                host_id: "misconfigured-peer".into(),
+                host_name: "错误通道设备".into(),
+                platform: Platform::Macos,
+                channel: 3,
+                ready: true,
+                keyboard_connected: false,
+                current_channel: None,
+                sent_at_ms: now_ms(),
+            },
+            None,
+            &outgoing,
+            None,
+            &mut peer_addrs,
+            &mut recent_claims,
+            &mut pending_claim,
+            &event_sender,
+            &mut active_remote_switch,
+        )
+        .await;
+
+        let state = snapshot.read().unwrap();
+        assert_eq!(state.hosts.len(), 2);
+        assert!(state.hosts.iter().any(|host| host.host_id == local_host_id));
+        assert!(
+            state
+                .hosts
+                .iter()
+                .all(|host| host.host_id != "misconfigured-peer")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_third_host_without_the_keyboard_does_not_dispatch_another_hosts_claim() {
+        let snapshot = Arc::new(RwLock::new(mac_snapshot()));
+        snapshot.write().unwrap().keyboard.connected = false;
+        let (outgoing, _) = broadcast::channel(4);
+        let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
+        let mut peer_addrs = HashMap::new();
+        let mut recent_claims = VecDeque::new();
+        let mut pending_claim = None;
+        let mut active_remote_switch = None;
+
+        handle_network_payload(
+            &snapshot,
+            Payload::Claim {
+                host_id: "mac-mini".into(),
+                channel: 1,
+                nonce: "mini-claim".into(),
+                sent_at_ms: now_ms(),
+            },
+            None,
+            &outgoing,
+            None,
+            &mut peer_addrs,
+            &mut recent_claims,
+            &mut pending_claim,
+            &event_sender,
+            &mut active_remote_switch,
+        )
+        .await;
+
+        assert!(active_remote_switch.is_none());
+        assert!(recent_claims.is_empty());
+        assert!(event_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1918,7 +2192,14 @@ mod tests {
         let active = Arc::new(AtomicUsize::new(0));
         let snapshot = Arc::new(RwLock::new(mac_snapshot()));
 
-        spawn_tcp_connection(server, outgoing.clone(), incoming_sender, active.clone());
+        spawn_tcp_connection(
+            server,
+            outgoing.clone(),
+            incoming_sender,
+            active.clone(),
+            Arc::new(Mutex::new(BTreeSet::new())),
+            None,
+        );
         tokio::time::timeout(Duration::from_secs(1), async {
             while active.load(Ordering::Relaxed) == 0 {
                 tokio::task::yield_now().await;
@@ -1932,7 +2213,7 @@ mod tests {
             &outgoing,
             &snapshot,
             heartbeat_payload(&snapshot),
-            None,
+            &HashMap::new(),
         )
         .await;
 
@@ -2018,14 +2299,29 @@ mod tests {
     }
 }
 
-fn mark_stale_peer(snapshot: &Arc<RwLock<AppSnapshot>>) {
+fn mark_stale_hosts(snapshot: &Arc<RwLock<AppSnapshot>>) {
     let mut state = snapshot.write().expect("snapshot poisoned");
-    let stale = state
-        .peer_host
-        .last_seen_ms
-        .is_none_or(|seen| now_ms() - seen > PEER_STALE_MS);
-    if stale {
-        state.peer_host.online = false;
-        state.peer_host.ready = false;
+    let local_host_id = state.config.host_id.clone();
+    let now = now_ms();
+    for host in state
+        .hosts
+        .iter_mut()
+        .filter(|host| host.host_id != local_host_id)
+    {
+        if host
+            .last_seen_ms
+            .is_none_or(|seen| now - seen > PEER_STALE_MS)
+        {
+            host.online = false;
+            host.ready = false;
+        }
+    }
+    if let Some(peer) = state
+        .hosts
+        .iter()
+        .find(|host| host.host_id == state.peer_host.host_id)
+        .cloned()
+    {
+        state.peer_host = peer;
     }
 }

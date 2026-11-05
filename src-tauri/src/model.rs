@@ -68,6 +68,7 @@ impl Default for AppConfig {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostView {
+    pub host_id: String,
     pub name: String,
     pub platform: Platform,
     pub channel: u8,
@@ -112,6 +113,7 @@ pub struct AppSnapshot {
     pub config: AppConfig,
     pub local_host: HostView,
     pub peer_host: HostView,
+    pub hosts: Vec<HostView>,
     pub keyboard: KeyboardView,
     pub diagnostics: DiagnosticsView,
     pub activities: Vec<ActivityEntry>,
@@ -121,29 +123,35 @@ pub struct AppSnapshot {
 
 impl AppSnapshot {
     pub fn initial(config: AppConfig) -> Self {
+        let local_host = HostView {
+            host_id: config.host_id.clone(),
+            name: config.host_name.clone(),
+            platform: config.platform.clone(),
+            channel: config.channel,
+            online: true,
+            ready: true,
+            last_seen_ms: Some(chrono::Utc::now().timestamp_millis()),
+        };
+        // 保留旧版 peerHost，方便 0.2.x 前端和配置平滑升级；真实多主机状态以 hosts 为准。
+        let peer_host = HostView {
+            host_id: format!("legacy-peer-{}", config.peer_channel),
+            name: match config.platform {
+                Platform::Macos => "Windows 工作站".into(),
+                Platform::Windows => "MacBook Pro".into(),
+            },
+            platform: match config.platform {
+                Platform::Macos => Platform::Windows,
+                Platform::Windows => Platform::Macos,
+            },
+            channel: config.peer_channel,
+            online: false,
+            ready: false,
+            last_seen_ms: None,
+        };
         Self {
-            local_host: HostView {
-                name: config.host_name.clone(),
-                platform: config.platform.clone(),
-                channel: config.channel,
-                online: true,
-                ready: true,
-                last_seen_ms: Some(chrono::Utc::now().timestamp_millis()),
-            },
-            peer_host: HostView {
-                name: match config.platform {
-                    Platform::Macos => "Windows 工作站".into(),
-                    Platform::Windows => "MacBook Pro".into(),
-                },
-                platform: match config.platform {
-                    Platform::Macos => Platform::Windows,
-                    Platform::Windows => Platform::Macos,
-                },
-                channel: config.peer_channel,
-                online: false,
-                ready: false,
-                last_seen_ms: None,
-            },
+            local_host: local_host.clone(),
+            peer_host: peer_host.clone(),
+            hosts: vec![local_host, peer_host],
             keyboard: KeyboardView {
                 connected: false,
                 receiver_name: None,

@@ -17,6 +17,11 @@ const mockLoading: AppSnapshot = {
   config: { hostId: "loading", hostName: "本机", platform: "macos", channel: 3, peerChannel: 2, pairingCode: "", autoRecall: true, launchAtLogin: false, movementThreshold: 3, debounceMs: 60, networkPort: 45823, ignoreSyntheticInput: true },
   localHost: { name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: false },
   peerHost: { name: "Windows 工作站", platform: "windows", channel: 2, online: false, ready: false },
+  hosts: [
+    { name: "Mac mini", platform: "macos", channel: 1, online: false, ready: false },
+    { name: "Windows 工作站", platform: "windows", channel: 2, online: false, ready: false },
+    { name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: false },
+  ],
   keyboard: { connected: false, supportsChangeHost: false },
   diagnostics: { inputMonitor: false, networkListener: false, hidAccess: false, receiverProbe: false, syntheticFilterMode: "正在初始化" },
   activities: [],
@@ -35,6 +40,7 @@ function friendlyHostName(host: HostView) {
   const normalized = host.name.replace(/\.local$/i, "").replace(/-/g, " ");
   if (/macbook\s*pro/i.test(normalized)) return "MacBook Pro";
   if (/macbook/i.test(normalized)) return "MacBook";
+  if (/mac\s*mini/i.test(normalized)) return "Mac mini";
   return normalized;
 }
 
@@ -49,13 +55,13 @@ function SettingsFields({ draft, onChange, disabled = false }: { draft: AppConfi
   return <div className="settings-fields">
     <label><span>本机名称</span><input disabled={disabled} value={draft.hostName} onChange={(event) => onChange({ ...draft, hostName: event.target.value })} /></label>
     <label><span>本机通道</span><select disabled={disabled} value={draft.channel} onChange={(event) => onChange(changeChannel(draft, Number(event.target.value)))}><option value={1}>通道 1</option><option value={2}>通道 2</option><option value={3}>通道 3</option></select></label>
-    <label><span>双端配对码</span><input type={draft.platform === "windows" ? "password" : "text"} autoComplete="off" disabled={disabled} value={draft.pairingCode} onChange={(event) => onChange({ ...draft, pairingCode: event.target.value })} /></label>
+    <label><span>局域网配对码</span><input type={draft.platform === "windows" ? "password" : "text"} autoComplete="off" disabled={disabled} value={draft.pairingCode} onChange={(event) => onChange({ ...draft, pairingCode: event.target.value })} /></label>
     <label><span>指针灵敏度</span><select disabled={disabled} value={draft.movementThreshold} onChange={(event) => onChange({ ...draft, movementThreshold: Number(event.target.value) })}><option value={2}>灵敏</option><option value={3}>推荐</option><option value={6}>稳健</option></select></label>
   </div>;
 }
 
 function ChannelStrip({ snapshot, channels, className = "" }: { snapshot: AppSnapshot; channels: HostView[]; className?: string }) {
-  return <section className={`channel-strip ${className}`} aria-label="键盘通道" style={{ "--channel-count": channels.length } as CSSProperties}>
+  return <section className={`channel-strip channel-count-${channels.length} ${className}`} aria-label="键盘通道" style={{ "--channel-count": channels.length } as CSSProperties}>
     {channels.map((host) => {
       const active = snapshot.keyboard.currentChannel === host.channel;
       return <article className={`channel ${active ? "is-active" : ""}`} key={host.channel} aria-current={active ? "true" : undefined} title={`${host.name} · 通道 ${host.channel}`}>

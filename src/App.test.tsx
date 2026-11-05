@@ -84,12 +84,12 @@ describe("KeyClaim", () => {
     expect(screen.getByText("Windows PC")).toBeVisible();
     expect(screen.getByLabelText("常用设置")).toBeVisible();
     expect(screen.getAllByRole("switch")).toHaveLength(2);
-    for (const field of ["本机名称", "本机通道", "双端配对码", "指针灵敏度"]) {
+    for (const field of ["本机名称", "本机通道", "局域网配对码", "指针灵敏度"]) {
       expect(screen.queryByLabelText(field)).not.toBeInTheDocument();
     }
     expect(screen.queryByRole("button", { name: "保存更改" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    for (const field of ["本机名称", "本机通道", "双端配对码", "指针灵敏度"]) {
+    for (const field of ["本机名称", "本机通道", "局域网配对码", "指针灵敏度"]) {
       expect(screen.getByLabelText(field)).toBeVisible();
     }
     fireEvent.change(screen.getByLabelText("本机名称"), { target: { value: "Windows QA" } });
@@ -166,5 +166,23 @@ describe("KeyClaim", () => {
       { name: "iPad", platform: "macos", channel: 1, online: true, ready: true },
     ];
     expect(getChannelHosts(snapshot).map((host) => host.channel)).toEqual([1, 2, 3]);
+  });
+
+  it("三机联动界面显示 Mac mini、Windows 和 MacBook 三个通道", async () => {
+    snapshot.hosts = [
+      { hostId: "macbook", name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: true },
+      { hostId: "mac-mini", name: "非哥的 Mac mini.local", platform: "macos", channel: 1, online: true, ready: true },
+      { hostId: "windows", name: "Windows 工作站", platform: "windows", channel: 2, online: true, ready: true },
+    ];
+    await renderReady();
+
+    const channelStrip = screen.getByRole("region", { name: "键盘通道" });
+    const channels = within(channelStrip).getAllByRole("article");
+    expect(channels).toHaveLength(3);
+    expect(channels.map((channel) => channel.textContent)).toEqual([
+      expect.stringContaining("通道 1Mac mini"),
+      expect.stringContaining("通道 2Windows 工作站"),
+      expect.stringContaining("通道 3MacBook Pro"),
+    ]);
   });
 });

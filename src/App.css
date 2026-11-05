@@ -125,6 +125,10 @@ main { display: flex; flex-direction: column; }
   box-shadow: 0 2px 6px rgb(23 105 224 / 0.26);
   transform: translateY(-50%);
 }
+.channel-count-3 .channel { padding-right: 16px; padding-left: 8px; }
+.channel-count-3 .channel.is-active { padding-right: 30px; }
+.channel-count-3 .channel strong { font-size: 14px; }
+.channel-count-3 .active-mark { right: 7px; width: 19px; height: 19px; }
 
 .quick-controls {
   min-height: 58px;
@@ -232,6 +236,7 @@ main { display: flex; flex-direction: column; }
 .windows-app main { flex: 1; min-height: 0; overflow: auto; }
 .windows-app .channel-strip { min-height: 84px; flex: none; margin: 0 18px; }
 .windows-app .channel strong { font-size: 16px; }
+.windows-app .channel-count-3 .channel strong { font-size: 15px; }
 .windows-app .quick-controls { min-height: 64px; flex: none; margin-top: auto; }
 .windows-app .attention-row { flex: none; margin: 10px 18px; }
 .windows-settings-view .settings-dialog header,

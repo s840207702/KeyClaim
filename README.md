@@ -1,7 +1,7 @@
 <div align="center">
   <img src="public/keyclaim-icon.png" width="156" alt="KeyClaim · 键来图标">
   <h1>KeyClaim · 键来</h1>
-  <p>两台电脑各用自己的鼠标，一把 MX Keys 自动跟随你正在使用的 Windows 或 Mac。</p>
+  <p>三台电脑各用自己的鼠标，一把 MX Keys 自动跟随你正在使用的 Windows 或 Mac。</p>
   <p><a href="https://github.com/s840207702/KeyClaim/releases">下载安装包</a> · <a href="docs/ARCHITECTURE.md">实现原理</a> · <a href="CONTRIBUTING.md">开发与贡献</a> · <a href="LICENSE">MIT 许可证</a></p>
 </div>
 
@@ -18,7 +18,7 @@ KeyClaim 检测本机鼠标或触控板活动，通过局域网通知当前持�
 | Windows 10 / 11 x64 | [KeyClaim_0.2.9_x64-setup.exe](https://github.com/s840207702/KeyClaim/releases/download/v0.2.9/KeyClaim_0.2.9_x64-setup.exe) | 退出旧版后运行安装向导；需要 WebView2 Runtime |
 | macOS Apple Silicon | [KeyClaim_0.2.9_aarch64.dmg](https://github.com/s840207702/KeyClaim/releases/download/v0.2.9/KeyClaim_0.2.9_aarch64.dmg) | 打开 DMG，将 KeyClaim.app 拖入 Applications |
 
-最新源码和两个平台的公开安装包均为 0.2.9。macOS 仅提供 Apple Silicon 包，完整最低系统版本兼容性尚未逐一验证。
+当前开发源码为 0.3.0，增加三机联动；公开稳定安装包仍为 0.2.9。macOS 仅提供 Apple Silicon 包，完整最低系统版本兼容性尚未逐一验证。
 
 Windows 安装包未签名，Mac 包未经过 Apple 公证，系统可能提示或阻止打开。请核对 Release 的 `SHA256SUMS.txt`，并一并保留许可证附件；不要关闭 SmartScreen、Gatekeeper 等系统安全保护。
 
@@ -26,25 +26,25 @@ Windows 安装包未签名，Mac 包未经过 Apple 公证，系统可能提示�
 
 | 项目 | 当前实机使用范围 |
 | --- | --- |
-| 键盘 | MX Keys，通过支持切换主机功能的 Logitech 接收器分别连接两台电脑 |
+| 键盘 | MX Keys，通过支持切换主机功能的 Logitech 接收器分别连接三台电脑 |
 | 系统 | Windows x64 + macOS Apple Silicon |
 | 鼠标 | Windows 使用 MX Master 3，Mac 使用 MX Master 3S 或内置触控板 |
-| 通道 | 默认 Windows 为 2，Mac 为 3 |
-| 网络 | 可信的同一局域网，两端在线并可处理后台任务 |
+| 通道 | Mac mini 为 1、Windows 为 2、MacBook Pro 为 3 |
+| 网络 | 可信的同一局域网，三端在线并可处理后台任务 |
 
-鼠标只用于检测本地活动，不需要具备 MX 系列切换能力；其他鼠标可能适用，但未逐一验证。其他键盘、MX Keys S、Bolt 键盘、纯蓝牙、Intel Mac、Linux 和三台电脑协作不在当前实机验收范围内。
+鼠标只用于检测本地活动，不需要具备 MX 系列切换能力；其他鼠标可能适用，但未逐一验证。其他键盘、MX Keys S、Bolt 键盘、纯蓝牙、Intel Mac 和 Linux 不在当前实机验收范围内。
 
 ## 首次配对
 
-1. 先用键盘的 Easy-Switch 将两台电脑配到不同通道，确认手动切换正常。
-2. 两端安装并启动 KeyClaim，点击右上角齿轮进入设置。
-3. 使用默认 Windows 通道 2、Mac 通道 3；新安装会在本机生成随机配对码，在两端填写相同的自定义随机配对码，建议不少于 32 个随机字符。已有配置继续沿用原值，不要使用公共默认值或账号密码。
-4. 按系统提示允许 Mac 输入监控、本地网络访问，并确认系统允许两端局域网通信。
-5. 开启“自动跟随”，在另一台电脑移动鼠标或触控板，检查键盘是否真正归位。
+1. 先用键盘的 Easy-Switch 将三台电脑分别配到通道 1、2、3，确认手动切换正常。
+2. 三端安装并启动 KeyClaim，点击右上角齿轮进入设置。
+3. 将 Mac mini 设为通道 1、Windows 设为通道 2、MacBook Pro 设为通道 3；三端填写完全相同的自定义随机配对码，建议不少于 32 个随机字符。
+4. 按系统提示允许两台 Mac 的输入监控、本地网络访问，并确认系统允许三端局域网通信。
+5. 开启“自动跟随”，依次在三台电脑移动鼠标或触控板，检查键盘是否真正归位。
 
 软件配对码是局域网消息的校验凭据，**不能代替键盘与接收器的硬件配对**。已有受支持设备通常只需设置，不需要修改源码。
 
-设置页支持 `Ctrl+,` / `⌘,` 打开、`Esc` 返回；“取消”不会保存修改。当前界面没有独立的对端通道入口，非默认通道组合还需确保配置文件中的 `channel` 与 `peerChannel` 在两端互相对应。
+设置页支持 `Ctrl+,` / `⌘,` 打开、`Esc` 返回；“取消”不会保存修改。每台电脑只设置自己的通道，其他主机会通过同一配对码在局域网中自动发现。
 
 Windows 关闭窗口后仍驻留托盘；Mac 默认驻留菜单栏、不占 Dock。通过设置页“退出键来”结束应用，两端均可开启开机自启。
 
@@ -54,7 +54,8 @@ Windows 关闭窗口后仍驻留托盘；Mac 默认驻留菜单栏、不占 Dock
 目标电脑检测本地输入 → 局域网召回请求 → 当前持有方切换键盘 → 目标方确认键盘上线
 ```
 
-- TCP 是主链路，UDP 广播辅助发现，默认端口均为 `45823`；Windows 会在本地 `/24` 网段探测对端。
+- TCP 是主链路，UDP 广播辅助发现，默认端口均为 `45823`；Windows 会在本地 `/24` 网段寻找并保持两条远端连接。
+- 0.3.0 增加三主机状态集合、通道 1 适配、双远端 TCP 发现与“仅当前持有键盘的主机执行切换”，避免第三台设备重复响应。
 - 配对码用于签名校验；消息有时效和重复请求检查，但通信不加密。配置及配对码保存在本机，没有云账号、遥测或公网中继。
 - macOS 使用原生输入监听，Windows 使用 Raw Input；不记录按键内容。
 - 当前持有方深度休眠时，仍需用 Easy-Switch 手动切换。

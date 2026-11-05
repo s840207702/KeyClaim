@@ -24,6 +24,7 @@ export interface AppConfig {
 }
 
 export interface HostView {
+  hostId?: string;
   name: string;
   platform: Platform;
   channel: number;
@@ -36,7 +37,7 @@ export interface AppSnapshot {
   config: AppConfig;
   localHost: HostView;
   peerHost: HostView;
-  /** 为后续三通道、多主机扩展预留；旧版后端缺省时仍使用 localHost + peerHost。 */
+  /** 三通道主机集合；旧版后端缺省时仍使用 localHost + peerHost。 */
   hosts?: HostView[];
   keyboard: {
     connected: boolean;
@@ -101,6 +102,11 @@ const browserSnapshot: AppSnapshot = {
     ready: true,
     lastSeenMs: Date.now() - 820,
   },
+  hosts: [
+    { hostId: "mac-mini", name: "Mac mini", platform: "macos", channel: 1, online: true, ready: true, lastSeenMs: Date.now() - 640 },
+    { hostId: "windows", name: "Windows 工作站", platform: "windows", channel: 2, online: true, ready: true, lastSeenMs: Date.now() - 820 },
+    { hostId: "browser-preview", name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: true, lastSeenMs: Date.now() },
+  ],
   keyboard: {
     connected: true,
     receiverName: "Logitech USB Receiver",
@@ -135,6 +141,11 @@ function getBrowserSnapshot() {
   snapshot.config = previewConfig;
   snapshot.localHost = { name: previewConfig.hostName, platform: "windows", channel: previewConfig.channel, online: true, ready: true, lastSeenMs: Date.now() };
   snapshot.peerHost = { name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: true, lastSeenMs: Date.now() - 820 };
+  snapshot.hosts = [
+    { hostId: "mac-mini", name: "Mac mini", platform: "macos", channel: 1, online: true, ready: true, lastSeenMs: Date.now() - 640 },
+    { hostId: "browser-preview", name: previewConfig.hostName, platform: "windows", channel: 2, online: true, ready: true, lastSeenMs: Date.now() },
+    { hostId: "macbook", name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: true, lastSeenMs: Date.now() - 820 },
+  ];
   snapshot.keyboard.currentChannel = 2;
   snapshot.diagnostics.syntheticFilterMode = "Windows Raw Input · 仅物理鼠标";
   return snapshot;
@@ -175,6 +186,9 @@ export async function saveConfig(config: AppConfig): Promise<AppSnapshot> {
     browserSnapshot.localHost.name = config.hostName;
     browserSnapshot.localHost.channel = config.channel;
     browserSnapshot.peerHost.channel = config.peerChannel;
+    browserSnapshot.hosts = browserSnapshot.hosts?.map((host) => host.hostId === config.hostId
+      ? { ...host, name: config.hostName, channel: config.channel, platform: config.platform }
+      : host);
   }
   return call<AppSnapshot>("update_config", { config });
 }
