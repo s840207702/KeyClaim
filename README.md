@@ -5,7 +5,9 @@
   <p><a href="https://github.com/s840207702/KeyClaim/releases">下载安装包</a> · <a href="docs/ARCHITECTURE.md">实现原理</a> · <a href="CONTRIBUTING.md">开发与贡献</a> · <a href="LICENSE">MIT 许可证</a></p>
 </div>
 
-![KeyClaim 三通道与常用开关界面示例](docs/assets/keyclaim-home.png)
+<p align="center">
+  <img src="docs/assets/keyclaim-home.png" width="404" alt="KeyClaim 三通道与常用开关界面示例">
+</p>
 
 KeyClaim 检测本机鼠标或触控板活动，通过局域网通知当前持有键盘的电脑，让它把 MX Keys 切到目标通道。**它不转发鼠标指针、按键内容或剪贴板**，也不是 Logitech 官方产品。
 
