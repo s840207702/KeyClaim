@@ -5,7 +5,7 @@
   <p><a href="https://github.com/s840207702/KeyClaim/releases">下载安装包</a> · <a href="docs/ARCHITECTURE.md">实现原理</a> · <a href="CONTRIBUTING.md">开发与贡献</a> · <a href="LICENSE">MIT 许可证</a></p>
 </div>
 
-![KeyClaim 通道与常用开关界面示例](docs/assets/keyclaim-home.png)
+![KeyClaim 三通道与常用开关界面示例](docs/assets/keyclaim-home.png)
 
 KeyClaim 检测本机鼠标或触控板活动，通过局域网通知当前持有键盘的电脑，让它把 MX Keys 切到目标通道。**它不转发鼠标指针、按键内容或剪贴板**，也不是 Logitech 官方产品。
 
@@ -46,7 +46,7 @@ Windows 安装包未签名，Mac 包未经过 Apple 公证，系统可能提示�
 
 设置页支持 `Ctrl+,` / `⌘,` 打开、`Esc` 返回；“取消”不会保存修改。每台电脑只设置自己的通道，其他主机会通过同一配对码在局域网中自动发现。
 
-Windows 关闭窗口后仍驻留托盘；Mac 默认驻留菜单栏、不占 Dock。通过设置页“退出键来”结束应用，两端均可开启开机自启。
+Windows 关闭窗口后仍驻留托盘；Mac 默认驻留菜单栏、不占 Dock。通过设置页“退出键来”结束应用，三端均可开启开机自启。
 
 ## 工作方式与限制
 

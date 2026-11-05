@@ -127,7 +127,7 @@ main { display: flex; flex-direction: column; }
 }
 .channel-count-3 .channel { padding-right: 16px; padding-left: 8px; }
 .channel-count-3 .channel.is-active { padding-right: 30px; }
-.channel-count-3 .channel strong { font-size: 14px; }
+.channel-count-3 .channel strong { font-size: 13px; }
 .channel-count-3 .active-mark { right: 7px; width: 19px; height: 19px; }
 
 .quick-controls {

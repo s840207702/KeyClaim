@@ -95,7 +95,7 @@ const browserSnapshot: AppSnapshot = {
     lastSeenMs: Date.now(),
   },
   peerHost: {
-    name: "Windows 工作站",
+    name: "Windows PC",
     platform: "windows",
     channel: 2,
     online: true,
@@ -104,7 +104,7 @@ const browserSnapshot: AppSnapshot = {
   },
   hosts: [
     { hostId: "mac-mini", name: "Mac mini", platform: "macos", channel: 1, online: true, ready: true, lastSeenMs: Date.now() - 640 },
-    { hostId: "windows", name: "Windows 工作站", platform: "windows", channel: 2, online: true, ready: true, lastSeenMs: Date.now() - 820 },
+    { hostId: "windows", name: "Windows PC", platform: "windows", channel: 2, online: true, ready: true, lastSeenMs: Date.now() - 820 },
     { hostId: "browser-preview", name: "MacBook Pro", platform: "macos", channel: 3, online: true, ready: true, lastSeenMs: Date.now() },
   ],
   keyboard: {
@@ -123,7 +123,7 @@ const browserSnapshot: AppSnapshot = {
   activities: [
     { id: "1", timestamp: "10:42:18", title: "键盘已归位", detail: "MX Keys → MacBook Pro · 通道 3", kind: "success" },
     { id: "2", timestamp: "10:42:17", title: "检测到本地输入", detail: "触控板移动 · 目标主机已就绪", kind: "claim" },
-    { id: "3", timestamp: "10:36:04", title: "另一台电脑已就绪", detail: "Windows 工作站 · 局域网握手成功", kind: "network" },
+    { id: "3", timestamp: "10:36:04", title: "另一台电脑已就绪", detail: "Windows PC · 局域网握手成功", kind: "network" },
   ],
   lastLocalInputMs: Date.now() - 1_200,
   pendingClaim: false,
