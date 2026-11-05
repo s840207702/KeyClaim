@@ -15,10 +15,10 @@ KeyClaim 检测本机鼠标或触控板活动，通过局域网通知当前持�
 
 | 平台 | 当前公开安装包 | 安装方法 |
 | --- | --- | --- |
-| Windows 10 / 11 x64 | [KeyClaim_0.2.9_x64-setup.exe](https://github.com/s840207702/KeyClaim/releases/download/v0.2.9/KeyClaim_0.2.9_x64-setup.exe) | 退出旧版后运行安装向导；需要 WebView2 Runtime |
-| macOS Apple Silicon | [KeyClaim_0.2.9_aarch64.dmg](https://github.com/s840207702/KeyClaim/releases/download/v0.2.9/KeyClaim_0.2.9_aarch64.dmg) | 打开 DMG，将 KeyClaim.app 拖入 Applications |
+| Windows 10 / 11 x64 | [KeyClaim_0.3.0_x64-setup.exe](https://github.com/s840207702/KeyClaim/releases/download/v0.3.0/KeyClaim_0.3.0_x64-setup.exe) | 退出旧版后运行安装向导；需要 WebView2 Runtime |
+| macOS Apple Silicon | [KeyClaim_0.3.0_aarch64.dmg](https://github.com/s840207702/KeyClaim/releases/download/v0.3.0/KeyClaim_0.3.0_aarch64.dmg) | 打开 DMG，将 KeyClaim.app 拖入 Applications |
 
-当前开发源码为 0.3.0，增加三机联动；公开稳定安装包仍为 0.2.9。macOS 仅提供 Apple Silicon 包，完整最低系统版本兼容性尚未逐一验证。
+当前公开稳定版本为 0.3.0，支持三机联动。macOS 仅提供 Apple Silicon 包，完整最低系统版本兼容性尚未逐一验证。
 
 Windows 安装包未签名，Mac 包未经过 Apple 公证，系统可能提示或阻止打开。请核对 Release 的 `SHA256SUMS.txt`，并一并保留许可证附件；不要关闭 SmartScreen、Gatekeeper 等系统安全保护。
 
